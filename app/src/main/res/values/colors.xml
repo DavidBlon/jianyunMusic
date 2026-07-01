@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="green_500">#FF58B86A</color>
+    <color name="green_700">#FF3D8B4F</color>
+    <color name="icon_background">#FF55BD79</color>
+    <color name="dark_bg">#FF0A0A0C</color>
+    <color name="dark_bg_2">#FF121214</color>
+    <color name="dark_surface">#FF1E1E24</color>
+    <color name="text_primary">#FFF0F0F2</color>
+    <color name="text_secondary">#FF909098</color>
+    <color name="text_tertiary">#FF55555E</color>
+</resources>

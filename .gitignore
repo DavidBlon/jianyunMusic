@@ -1,0 +1,25 @@
+# Android / Gradle
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
+
+# Kotlin
+.kotlin/
+
+# Node
+node_modules/
+package-lock.json
+
+# IDE
+.agents/
+.codex/
+
+# OS
+D:SoftWarecursor
+
+# Temp files
+build_output.txt
+build_errors.txt
