@@ -12,6 +12,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -38,11 +39,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
@@ -55,6 +61,8 @@ import com.ncm.app.viewmodel.PlayerViewModel
 import kotlinx.coroutines.delay
 
 private const val MINI_PLAYER_FADE_MILLIS = 250
+private const val SPLASH_HOLD_MILLIS = 1_600L
+private const val SPLASH_FADE_MILLIS = 500
 
 class MainActivity : ComponentActivity() {
     private val notificationPermissionLauncher =
@@ -117,61 +125,160 @@ fun MainApp() {
         }
     }
 
-    Scaffold(
-        containerColor = DarkBg,
-        bottomBar = {
-            if (showBottomBar) {
-                BottomNavigationBar(
-                    currentRoute = currentRoute,
-                    onNavigate = { route ->
-                        if (route != currentRoute) {
-                            navController.navigate(route) {
-                                popUpTo(Routes.DISCOVER)
-                                launchSingleTop = true
-                            }
-                        }
-                    }
-                )
-            }
-        }
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            NavGraph(
-                navController = navController,
-                isLoggedIn = appState.isLoggedIn,
-                mainViewModel = mainViewModel,
-                playerViewModel = playerViewModel,
-                modifier = Modifier.fillMaxSize()
-            )
-
-            AnimatedVisibility(
-                visible = showMiniPlayer,
-                enter = fadeIn(animationSpec = tween(MINI_PLAYER_FADE_MILLIS)),
-                exit = fadeOut(animationSpec = tween(MINI_PLAYER_FADE_MILLIS)),
-                modifier = Modifier.align(Alignment.BottomCenter)
-            ) {
-                MiniPlayer(
-                    songName = playerState.currentSong?.name.orEmpty(),
-                    artist = playerState.currentSong?.artistText.orEmpty(),
-                    coverUrl = playerState.currentSong?.album?.picUrl,
-                    isPlaying = playerState.isPlaying,
-                    progress = playerState.progress,
-                    onPlayPause = { playerViewModel.togglePlay() },
-                    onPrevious = { playerViewModel.playPrev() },
-                    onNext = { playerViewModel.playNext() },
-                    onClick = {
-                        playerState.currentSong?.let {
-                            if (currentRoute != Routes.player(it.id)) {
-                                navController.navigate(Routes.player(it.id)) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            containerColor = DarkBg,
+            bottomBar = {
+                if (showBottomBar) {
+                    BottomNavigationBar(
+                        currentRoute = currentRoute,
+                        onNavigate = { route ->
+                            if (route != currentRoute) {
+                                navController.navigate(route) {
+                                    popUpTo(Routes.DISCOVER)
                                     launchSingleTop = true
                                 }
                             }
                         }
-                    }
+                    )
+                }
+            }
+        ) { padding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+            ) {
+                NavGraph(
+                    navController = navController,
+                    isLoggedIn = appState.isLoggedIn,
+                    mainViewModel = mainViewModel,
+                    playerViewModel = playerViewModel,
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                AnimatedVisibility(
+                    visible = showMiniPlayer,
+                    enter = fadeIn(animationSpec = tween(MINI_PLAYER_FADE_MILLIS)),
+                    exit = fadeOut(animationSpec = tween(MINI_PLAYER_FADE_MILLIS)),
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                ) {
+                    MiniPlayer(
+                        songName = playerState.currentSong?.name.orEmpty(),
+                        artist = playerState.currentSong?.artistText.orEmpty(),
+                        coverUrl = playerState.currentSong?.album?.picUrl,
+                        isPlaying = playerState.isPlaying,
+                        progress = playerState.progress,
+                        onPlayPause = { playerViewModel.togglePlay() },
+                        onPrevious = { playerViewModel.playPrev() },
+                        onNext = { playerViewModel.playNext() },
+                        onClick = {
+                            playerState.currentSong?.let {
+                                if (currentRoute != Routes.player(it.id)) {
+                                    navController.navigate(Routes.player(it.id)) {
+                                        launchSingleTop = true
+                                    }
+                                }
+                            }
+                        }
+                    )
+                }
+            }
+        }
+
+        OpeningSplash()
+    }
+}
+
+@Composable
+private fun OpeningSplash() {
+    var visible by remember { mutableStateOf(true) }
+    var started by remember { mutableStateOf(false) }
+    val logoAlpha by animateFloatAsState(
+        targetValue = if (started) 1f else 0f,
+        animationSpec = tween(durationMillis = 700),
+        label = "splashLogoAlpha"
+    )
+    val logoScale by animateFloatAsState(
+        targetValue = if (started) 1f else 0.86f,
+        animationSpec = tween(durationMillis = 700),
+        label = "splashLogoScale"
+    )
+
+    LaunchedEffect(Unit) {
+        started = true
+        delay(SPLASH_HOLD_MILLIS)
+        visible = false
+    }
+
+    AnimatedVisibility(
+        visible = visible,
+        exit = fadeOut(animationSpec = tween(SPLASH_FADE_MILLIS))
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(DarkBg),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier.graphicsLayer {
+                    alpha = logoAlpha
+                    scaleX = logoScale
+                    scaleY = logoScale
+                }
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(112.dp)
+                        .shadow(
+                            elevation = 24.dp,
+                            shape = RoundedCornerShape(30.dp),
+                            ambientColor = Green500.copy(alpha = 0.22f),
+                            spotColor = Green500.copy(alpha = 0.18f)
+                        )
+                        .clip(RoundedCornerShape(30.dp))
+                        .background(DarkBg2),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Image(
+                        painter = painterResource(R.drawable.ic_launcher_full),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = 1.08f
+                                scaleY = 1.08f
+                            },
+                        contentScale = ContentScale.Crop
+                    )
+                }
+                Spacer(modifier = Modifier.height(30.dp))
+                Box(
+                    modifier = Modifier
+                        .width(40.dp)
+                        .height(1.dp)
+                        .background(GreenAccent.copy(alpha = 0.72f))
+                )
+                Spacer(modifier = Modifier.height(18.dp))
+                Text(
+                    text = "让音乐\n回归音乐本身",
+                    style = MaterialTheme.typography.headlineMedium.copy(
+                        fontSize = 22.sp,
+                        lineHeight = 34.sp
+                    ),
+                    color = TextPrimary.copy(alpha = 0.94f),
+                    fontWeight = FontWeight.Light,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Box(
+                    modifier = Modifier
+                        .width(76.dp)
+                        .height(1.dp)
+                        .background(Color.White.copy(alpha = 0.18f))
                 )
             }
         }

@@ -6,8 +6,13 @@ import com.google.gson.JsonObject
 import com.ncm.app.data.SessionManager
 import com.ncm.app.data.api.NeteaseApi
 import com.ncm.app.data.model.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import java.io.IOException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.net.URLEncoder
 
 class MusicRepository(
@@ -17,6 +22,8 @@ class MusicRepository(
 
     private companion object {
         private const val NEW_SONG_CHART_FALLBACK_ID = 3779629L
+        private const val NETWORK_MAX_ATTEMPTS = 3
+        private const val NETWORK_RETRY_DELAY_MS = 450L
     }
 
     suspend fun getDiscoverHome(): Result<DiscoverHomeResponse> = safeCall {
@@ -304,11 +311,42 @@ class MusicRepository(
 
     private suspend fun <T> safeCall(call: suspend () -> T): Result<T> {
         return withContext(Dispatchers.IO) {
-            try {
-                Result.success(call())
-            } catch (e: Exception) {
-                Result.failure(e)
+            var lastError: Exception? = null
+            repeat(NETWORK_MAX_ATTEMPTS) { attempt ->
+                try {
+                    return@withContext Result.success(call())
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    lastError = e
+                    if (!e.isRetryableNetworkError() || attempt == NETWORK_MAX_ATTEMPTS - 1) {
+                        return@withContext Result.failure(e.toUserFacingException())
+                    }
+                    delay(NETWORK_RETRY_DELAY_MS * (attempt + 1))
+                }
             }
+            Result.failure((lastError ?: IllegalStateException("Unknown network error")).toUserFacingException())
+        }
+    }
+
+    private fun Exception.isRetryableNetworkError(): Boolean {
+        return this is IOException || cause is IOException
+    }
+
+    private fun Exception.toUserFacingException(): Exception {
+        val friendlyMessage = when {
+            this is UnknownHostException || cause is UnknownHostException ->
+                "\u7f51\u7edc\u89e3\u6790\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5 DNS \u6216\u7f51\u7edc\u540e\u91cd\u8bd5"
+            this is SocketTimeoutException || cause is SocketTimeoutException ->
+                "\u7f51\u7edc\u8d85\u65f6\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5"
+            this is IOException || cause is IOException ->
+                "\u7f51\u7edc\u8fde\u63a5\u5f02\u5e38\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5"
+            else -> message
+        }
+        return if (friendlyMessage == message || friendlyMessage.isNullOrBlank()) {
+            this
+        } else {
+            RuntimeException(friendlyMessage, this)
         }
     }
 
