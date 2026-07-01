@@ -26,6 +26,7 @@ import coil.compose.AsyncImage
 import com.ncm.app.data.model.Playlist
 import com.ncm.app.data.model.UserProfile
 import com.ncm.app.ui.theme.*
+import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
 
 @Composable
@@ -97,7 +98,7 @@ private fun ProfileHeader(profile: UserProfile?) {
             contentAlignment = Alignment.Center
         ) {
             if (!profile?.avatar.isNullOrBlank()) {
-                AsyncImage(profile?.avatar, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                AsyncImage(sizedImageUrl(profile?.avatar, 140), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else {
                 Icon(androidx.compose.material.icons.Icons.Outlined.Person, null, tint = TextPrimary, modifier = Modifier.size(28.dp))
             }
@@ -120,7 +121,7 @@ private fun MyPlaylistItem(playlist: Playlist, onClick: () -> Unit) {
     ) {
         Box(modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)).background(DarkSurface), contentAlignment = Alignment.Center) {
             if (!playlist.cover.isNullOrBlank()) {
-                AsyncImage(playlist.cover, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                AsyncImage(sizedImageUrl(playlist.cover, 140), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else {
                 Icon(androidx.compose.material.icons.Icons.AutoMirrored.Outlined.QueueMusic, null, tint = TextTertiary, modifier = Modifier.size(24.dp))
             }

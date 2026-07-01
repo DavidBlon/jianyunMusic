@@ -78,7 +78,7 @@ interface NeteaseApi {
     @GET("api/v6/playlist/detail")
     suspend fun getPlaylistDetail(
         @Query("id") id: Long,
-        @Query("n") count: Int = 100000,
+        @Query("n") count: Int = 120,
         @Query("s") subscribers: Int = 8
     ): JsonObject
 

@@ -10,6 +10,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -24,6 +25,10 @@ class MusicRepository(
         private const val NEW_SONG_CHART_FALLBACK_ID = 3779629L
         private const val NETWORK_MAX_ATTEMPTS = 3
         private const val NETWORK_RETRY_DELAY_MS = 450L
+        private const val OFFICIAL_SONG_URL_TIMEOUT_MS = 2_500L
+        private const val BACKUP_SONG_URL_TIMEOUT_MS = 6_500L
+        private const val PLAYLIST_INITIAL_TRACK_LIMIT = 120
+        private const val PLAYLIST_FULL_TRACK_LIMIT = 100000
     }
 
     suspend fun getDiscoverHome(): Result<DiscoverHomeResponse> = safeCall {
@@ -121,6 +126,77 @@ class MusicRepository(
         )
     }
 
+    suspend fun getSongUrlWithFallbackTimeout(songId: Long, br: Int = 128000, fee: Int = 0): Result<SongUrlResponse> = safeCall {
+        val item = withTimeoutOrNull(OFFICIAL_SONG_URL_TIMEOUT_MS) {
+            runCatching {
+                api.getSongUrl("[$songId]", br).array("data").firstOrNull()?.objOrNull()
+            }.getOrNull()
+        }
+        val rawUrl = item?.string("url")
+        val playableUrl = rawUrl?.replaceFirst("http://", "https://")
+        val code = item?.int("code") ?: 404
+
+        if (!playableUrl.isNullOrBlank()) {
+            return@safeCall SongUrlResponse(
+                url = playableUrl,
+                source = "netease",
+                br = item?.int("br") ?: 0,
+                size = item?.long("size") ?: 0,
+                type = item?.string("type"),
+                encodeType = item?.string("encodeType"),
+                freeTrialInfo = item?.get("freeTrialInfo"),
+                code = code,
+                loggedIn = session.isLoggedIn,
+                error = null
+            )
+        }
+
+        getBackupSongUrlInternal(songId, br)?.let { return@safeCall it }
+
+        SongUrlResponse(
+            url = null,
+            br = item?.int("br") ?: 0,
+            size = item?.long("size") ?: 0,
+            code = code,
+            loggedIn = session.isLoggedIn,
+            error = playbackUnavailableMessage(item, null, code, fee)
+        )
+    }
+
+    suspend fun getBackupSongUrl(songId: Long, br: Int = 128000): Result<SongUrlResponse> = safeCall {
+        getBackupSongUrlInternal(songId, br) ?: SongUrlResponse(
+            url = null,
+            br = br,
+            code = 404,
+            loggedIn = session.isLoggedIn,
+            error = "备用音源暂时不可用"
+        )
+    }
+
+    private suspend fun getBackupSongUrlInternal(songId: Long, br: Int): SongUrlResponse? {
+        return withTimeoutOrNull(BACKUP_SONG_URL_TIMEOUT_MS) {
+            val songs = getSongDetail(listOf(songId)).getOrNull().orEmpty()
+            val song = songs.firstOrNull()
+            val info = UnblockManager.SongInfo(
+                id = songId,
+                name = song?.name ?: "",
+                artists = song?.artists.orEmpty(),
+                duration = song?.dt ?: 0,
+                quality = br.toBackupQuality()
+            )
+            val result = unblockManager.unblock(info) ?: return@withTimeoutOrNull null
+            SongUrlResponse(
+                url = result.url,
+                source = result.source,
+                br = result.bitrate,
+                type = "mp3",
+                code = 200,
+                loggedIn = session.isLoggedIn,
+                error = null
+            )
+        }
+    }
+
     suspend fun getLyric(id: Long): Result<LyricResponse> = safeCall {
         val body = api.getLyric(id)
         LyricResponse(
@@ -130,8 +206,12 @@ class MusicRepository(
         )
     }
 
-    suspend fun getPlaylistTracks(id: Long): Result<PlaylistTracksResponse> = safeCall {
-        val body = api.getPlaylistDetail(id)
+    suspend fun getPlaylistTracks(
+        id: Long,
+        count: Int = PLAYLIST_INITIAL_TRACK_LIMIT,
+        complete: Boolean = false
+    ): Result<PlaylistTracksResponse> = safeCall {
+        val body = api.getPlaylistDetail(id, count = count)
         val playlist = body.obj("playlist").takeIf { it.size() > 0 } ?: body.obj("result")
         val tracks = playlist.array("tracks").ifEmpty { body.array("songs") }
         PlaylistTracksResponse(
@@ -141,7 +221,11 @@ class MusicRepository(
                 cover = playlist.string("coverImgUrl")?.httpsUrl(),
                 trackCount = playlist.int("trackCount").takeIf { it > 0 } ?: tracks.size
             ),
-            tracks = completePlaylistSongs(playlist, tracks)
+            tracks = completePlaylistSongs(
+                playlist = playlist,
+                rawTracks = tracks,
+                missingLimit = if (complete) PLAYLIST_FULL_TRACK_LIMIT else (count - tracks.size).coerceAtLeast(0)
+            )
         )
     }
 
@@ -366,15 +450,22 @@ class MusicRepository(
         }
     }
 
-    private suspend fun completePlaylistSongs(playlist: JsonObject, rawTracks: List<JsonElement>): List<Song> {
+    private suspend fun completePlaylistSongs(
+        playlist: JsonObject,
+        rawTracks: List<JsonElement>,
+        missingLimit: Int
+    ): List<Song> {
         val parsedTracks = rawTracks.mapNotNull { it.objOrNull()?.toSong() }
         val parsedById = parsedTracks.associateBy { it.id }
         val knownIds = parsedById.keys
         val trackIds = playlist.array("trackIds")
             .mapNotNull { it.objOrNull()?.long("id")?.takeIf { id -> id > 0 } }
-        val missingIds = trackIds.filterNot { it in knownIds }
+        val missingIds = trackIds
+            .filterNot { it in knownIds }
+            .take(missingLimit)
 
-        if (missingIds.isEmpty()) return parsedTracks
+        if (trackIds.isEmpty()) return parsedTracks
+        if (missingIds.isEmpty()) return trackIds.mapNotNull { parsedById[it] }.ifEmpty { parsedTracks }
 
         val extraSongs = missingIds
             .chunked(200)

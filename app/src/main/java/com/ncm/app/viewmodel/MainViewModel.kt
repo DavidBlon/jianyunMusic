@@ -24,7 +24,8 @@ data class PlaylistDetailUiState(
     val songs: List<Song> = emptyList(),
     val isLoading: Boolean = false,
     val error: String? = null,
-    val loadedPlaylistId: Long = 0
+    val loadedPlaylistId: Long = 0,
+    val isFullyLoaded: Boolean = false
 )
 
 data class SearchUiState(
@@ -116,21 +117,56 @@ class MainViewModel : ViewModel() {
 
     fun loadPlaylistDetail(id: Long, force: Boolean = false) {
         if (!force) {
-            playlistCache[id]?.takeIf { it.isCompleteEnough() }?.let {
+            playlistCache[id]?.let {
                 _playlistState.value = it
                 syncLoadedPlaylistToMyState(it)
-                return
+                if (it.isCompleteEnough()) return
             }
         }
         if (_playlistState.value.isLoading && _playlistState.value.loadedPlaylistId == id) return
 
         viewModelScope.launch {
-            _playlistState.value = PlaylistDetailUiState(isLoading = true, loadedPlaylistId = id)
-            repo.getPlaylistTracks(id).onSuccess { resp ->
-                val state = PlaylistDetailUiState(resp.playlist, resp.tracks, isLoading = false, loadedPlaylistId = id)
-                playlistCache[id] = state
-                _playlistState.value = state
-                syncLoadedPlaylistToMyState(state)
+            val cachedSongs = playlistCache[id]?.songs.orEmpty()
+            _playlistState.value = PlaylistDetailUiState(
+                playlist = playlistCache[id]?.playlist,
+                songs = cachedSongs,
+                isLoading = true,
+                loadedPlaylistId = id,
+                isFullyLoaded = false
+            )
+            repo.getPlaylistTracks(id, count = 120, complete = false).onSuccess { resp ->
+                val firstState = PlaylistDetailUiState(
+                    playlist = resp.playlist,
+                    songs = resp.tracks,
+                    isLoading = resp.playlist?.trackCount?.let { resp.tracks.size < it } == true,
+                    loadedPlaylistId = id,
+                    isFullyLoaded = resp.playlist?.trackCount?.let { resp.tracks.size >= it } ?: true
+                )
+                playlistCache[id] = firstState
+                _playlistState.value = firstState
+                syncLoadedPlaylistToMyState(firstState)
+
+                if (!firstState.isFullyLoaded) {
+                    repo.getPlaylistTracks(id, count = 100000, complete = true).onSuccess { fullResp ->
+                        val fullState = PlaylistDetailUiState(
+                            playlist = fullResp.playlist,
+                            songs = fullResp.tracks,
+                            isLoading = false,
+                            loadedPlaylistId = id,
+                            isFullyLoaded = true
+                        )
+                        playlistCache[id] = fullState
+                        if (_playlistState.value.loadedPlaylistId == id) {
+                            _playlistState.value = fullState
+                        }
+                        syncLoadedPlaylistToMyState(fullState)
+                    }.onFailure {
+                        val current = _playlistState.value
+                        if (current.loadedPlaylistId == id) {
+                            _playlistState.value = current.copy(isLoading = false)
+                        }
+                    }
+                }
             }.onFailure { e ->
                 _playlistState.value = PlaylistDetailUiState(isLoading = false, error = e.message, loadedPlaylistId = id)
             }
@@ -138,8 +174,7 @@ class MainViewModel : ViewModel() {
     }
 
     private fun PlaylistDetailUiState.isCompleteEnough(): Boolean {
-        val expected = playlist?.trackCount ?: 0
-        return expected <= 0 || songs.size >= expected
+        return loadedPlaylistId > 0 && playlist != null && songs.isNotEmpty() && isFullyLoaded
     }
 
     private fun syncLoadedPlaylistToMyState(state: PlaylistDetailUiState) {

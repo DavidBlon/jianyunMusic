@@ -17,6 +17,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.getSystemService
 import com.ncm.app.R
+import com.ncm.app.util.sizedImageUrl
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import java.net.HttpURLConnection
@@ -153,7 +154,8 @@ class MusicPlaybackService : MediaSessionService() {
         if (!loadingCoverIds.add(songId)) return
         thread(name = "notification-cover-$songId") {
             val bitmap = runCatching {
-                val connection = (URL(imageUrl).openConnection() as HttpURLConnection).apply {
+                val coverUrl = sizedImageUrl(imageUrl, COVER_SIZE_PX) ?: imageUrl
+                val connection = (URL(coverUrl).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 1_500
                     readTimeout = 1_500
                     useCaches = true
@@ -163,7 +165,11 @@ class MusicPlaybackService : MediaSessionService() {
                 try {
                     connection.inputStream.use { input ->
                         BitmapFactory.decodeStream(input)?.let { decoded ->
-                            Bitmap.createScaledBitmap(decoded, COVER_SIZE_PX, COVER_SIZE_PX, true)
+                            if (decoded.width <= COVER_SIZE_PX && decoded.height <= COVER_SIZE_PX) {
+                                decoded
+                            } else {
+                                Bitmap.createScaledBitmap(decoded, COVER_SIZE_PX, COVER_SIZE_PX, true)
+                            }
                         }
                     }
                 } finally {

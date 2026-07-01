@@ -10,12 +10,19 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.session.MediaSession
 import com.ncm.app.MainActivity
 import com.ncm.app.data.model.Song
+import com.ncm.app.util.sizedImageUrl
+import java.io.File
 
 object AppPlayer {
     private const val TAG = "AppPlayer"
@@ -27,6 +34,7 @@ object AppPlayer {
 
     private var exoPlayer: ExoPlayer? = null
     private var mediaSession: MediaSession? = null
+    private var mediaCache: SimpleCache? = null
     private var playbackServiceStarted = false
     private var currentSong: Song? = null
     private var currentSource: String = "netease"
@@ -36,21 +44,47 @@ object AppPlayer {
         val appContext = context.applicationContext
         return exoPlayer ?: ExoPlayer.Builder(appContext)
             .setWakeMode(C.WAKE_MODE_NETWORK)
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        20_000,
+                        90_000,
+                        2_500,
+                        5_000
+                    )
+                    .setPrioritizeTimeOverSizeThresholds(true)
+                    .build()
+            )
             .setMediaSourceFactory(
-                DefaultMediaSourceFactory(
-                    DefaultHttpDataSource.Factory()
-                        .setAllowCrossProtocolRedirects(true)
-                        .setUserAgent("Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
-                        .setDefaultRequestProperties(
-                            mapOf(
-                                "Referer" to "https://music.163.com/",
-                                "Origin" to "https://music.163.com"
-                            )
-                        )
-                )
+                DefaultMediaSourceFactory(cacheDataSourceFactory(appContext))
             )
             .build()
             .also { exoPlayer = it }
+    }
+
+    private fun cacheDataSourceFactory(context: Context): CacheDataSource.Factory {
+        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+            .setAllowCrossProtocolRedirects(true)
+            .setUserAgent("Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
+            .setDefaultRequestProperties(
+                mapOf(
+                    "Referer" to "https://music.163.com/",
+                    "Origin" to "https://music.163.com"
+                )
+            )
+
+        return CacheDataSource.Factory()
+            .setCache(mediaCache(context))
+            .setUpstreamDataSourceFactory(httpDataSourceFactory)
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+    }
+
+    private fun mediaCache(context: Context): SimpleCache {
+        return mediaCache ?: SimpleCache(
+            File(context.cacheDir, "media"),
+            LeastRecentlyUsedCacheEvictor(512L * 1024L * 1024L),
+            StandaloneDatabaseProvider(context)
+        ).also { mediaCache = it }
     }
 
     fun startPlaybackService(context: Context) {
@@ -126,7 +160,7 @@ object AppPlayer {
             .setTitle(song.name)
             .setArtist(song.artistText)
             .setAlbumTitle(song.album?.name)
-            .setArtworkUri(song.album?.picUrl?.takeIf { it.isNotBlank() }?.let(Uri::parse))
+            .setArtworkUri(sizedImageUrl(song.album?.picUrl, 300)?.let(Uri::parse))
             .build()
 
         return MediaItem.Builder()
@@ -151,6 +185,8 @@ object AppPlayer {
         releaseSession()
         exoPlayer?.release()
         exoPlayer = null
+        mediaCache?.release()
+        mediaCache = null
         currentSong = null
         currentSource = "netease"
         mediaSnapshots.clear()

@@ -32,6 +32,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.ncm.app.data.model.Song
 import com.ncm.app.ui.theme.*
+import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
 
 @Composable
@@ -112,7 +113,19 @@ fun PlaylistDetailScreen(
                 }
             }
 
-            if (state.isLoading) {
+            if (state.isLoading && visibleSongs.isNotEmpty()) {
+                item {
+                    LinearProgressIndicator(
+                        color = Green500,
+                        trackColor = DarkBorder,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            if (state.isLoading && visibleSongs.isEmpty()) {
                 item {
                     Box(
                         modifier = Modifier
@@ -160,7 +173,7 @@ private fun PlaylistHeader(
     ) {
         if (!coverUrl.isNullOrBlank()) {
             AsyncImage(
-                model = coverUrl.highQualityCoverUrl(),
+                model = sizedImageUrl(coverUrl, 800),
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop
@@ -335,9 +348,4 @@ fun SongListItem(
     }
 
     HorizontalDivider(color = DarkBorder, thickness = 0.5.dp, modifier = modifier)
-}
-
-private fun String.highQualityCoverUrl(): String {
-    val clean = substringBefore("?")
-    return "$clean?param=1200y1200"
 }

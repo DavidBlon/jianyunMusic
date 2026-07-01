@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.ncm.app.ui.theme.*
+import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.PlayMode
 import com.ncm.app.viewmodel.PlaybackQuality
@@ -293,7 +294,7 @@ private fun Disc(
     ) {
         if (!coverUrl.isNullOrBlank()) {
             AsyncImage(
-                model = coverUrl,
+                model = sizedImageUrl(coverUrl, 700),
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop

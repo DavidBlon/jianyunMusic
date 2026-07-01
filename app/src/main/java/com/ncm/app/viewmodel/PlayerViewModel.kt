@@ -9,7 +9,9 @@ import androidx.media3.common.Player
 import com.ncm.app.NeteaseApp
 import com.ncm.app.data.model.Song
 import com.ncm.app.playback.AppPlayer
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -48,10 +50,20 @@ class PlayerViewModel : ViewModel() {
 
     private companion object {
         private const val TAG = "PlayerViewModel"
-        private const val PREPARED_QUEUE_WINDOW = 10
+        private const val PREPARED_QUEUE_WINDOW = 3
+        private const val SONG_URL_CACHE_LIMIT = 80
+        private const val PLAY_REQUEST_DEBOUNCE_MS = 180L
+        private const val QUEUE_PREFETCH_START_DELAY_MS = 700L
+        private const val QUEUE_PREFETCH_REQUEST_DELAY_MS = 300L
+        private const val BUFFERING_FALLBACK_TIMEOUT_MS = 5_000L
         private const val PROGRESS_UPDATE_INTERVAL_MS = 500L
         private const val MIN_PROGRESS_UPDATE_MS = 400L
     }
+
+    private data class UrlCacheKey(
+        val songId: Long,
+        val bitrate: Int
+    )
 
     private data class PreparedQueueItem(
         val song: Song,
@@ -71,15 +83,28 @@ class PlayerViewModel : ViewModel() {
     private var playRequestToken: Long = 0
     private var progressJob: Job? = null
     private var queuePrefetchJob: Job? = null
+    private var bufferingFallbackJob: Job? = null
+    private var queuePrefetchAnchorSongId: Long? = null
+    private var transientBackupSongId: Long? = null
     private val preparedQueueItems = mutableMapOf<Long, PreparedQueueItem>()
+    private val pendingSongUrlRequests = mutableMapOf<UrlCacheKey, Deferred<Result<PreparedQueueItem?>>>()
+    private val songUrlCache = object : LinkedHashMap<UrlCacheKey, PreparedQueueItem>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<UrlCacheKey, PreparedQueueItem>?): Boolean {
+            return size > SONG_URL_CACHE_LIMIT
+        }
+    }
 
     private val player = AppPlayer.player(app)
 
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             when (playbackState) {
-                Player.STATE_BUFFERING -> _state.value = _state.value.copy(isLoading = true)
+                Player.STATE_BUFFERING -> {
+                    _state.value = _state.value.copy(isLoading = true)
+                    scheduleBufferingFallback()
+                }
                 Player.STATE_READY -> {
+                    bufferingFallbackJob?.cancel()
                     _state.value = _state.value.copy(
                         isLoading = false,
                         isPlaying = player.playWhenReady,
@@ -89,6 +114,7 @@ class PlayerViewModel : ViewModel() {
                     startProgressUpdates()
                 }
                 Player.STATE_ENDED -> {
+                    bufferingFallbackJob?.cancel()
                     _state.value = _state.value.copy(isPlaying = false, progress = 1f)
                     if (_state.value.playMode == PlayMode.REPEAT_ONE) {
                         player.seekTo(0)
@@ -109,6 +135,7 @@ class PlayerViewModel : ViewModel() {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             val songId = mediaItem?.mediaId?.toLongOrNull() ?: return
             if (_state.value.currentSong?.id == songId) return
+            clearTransientBackupIfLeaving(songId)
             val prepared = preparedQueueItems[songId]
                 ?: playQueue.firstOrNull { it.id == songId }?.let { song ->
                     PreparedQueueItem(song, mediaItem.localConfiguration?.uri.toString(), "netease")
@@ -144,11 +171,16 @@ class PlayerViewModel : ViewModel() {
 
         override fun onPlayerError(error: PlaybackException) {
             Log.e(TAG, "playerError ${error.errorCodeName}", error)
-            _state.value = _state.value.copy(
-                isLoading = false,
-                isPlaying = false,
-                error = "播放失败：${error.errorCodeName}"
-            )
+            val song = _state.value.currentSong
+            if (song != null && _state.value.audioSource == "netease") {
+                switchToBackupSource(song.id, ++playRequestToken, "播放失败，正在切换备用音源")
+            } else {
+                _state.value = _state.value.copy(
+                    isLoading = false,
+                    isPlaying = false,
+                    error = "播放失败：${error.errorCodeName}"
+                )
+            }
         }
     }
 
@@ -167,7 +199,6 @@ class PlayerViewModel : ViewModel() {
 
         val requestToken = ++playRequestToken
         playRequestJob?.cancel()
-        queuePrefetchJob?.cancel()
         playRequestJob = viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             repo.getSongDetail(listOf(songId)).onSuccess { songs ->
@@ -178,9 +209,6 @@ class PlayerViewModel : ViewModel() {
                     return@onSuccess
                 }
 
-                progressJob?.cancel()
-                player.stop()
-                player.clearMediaItems()
                 _state.value = _state.value.copy(
                     currentSong = song,
                     songUrl = null,
@@ -195,13 +223,12 @@ class PlayerViewModel : ViewModel() {
                     isLikeUpdating = false
                 )
                 refreshLiked(songId)
-                repo.getSongUrl(songId, _state.value.quality.bitrate, song.fee).onSuccess { urlResp ->
+                resolvePreparedSong(song, _state.value.quality.bitrate).onSuccess { prepared ->
                     if (!isCurrentSongRequest(requestToken, songId)) return@onSuccess
-                    val url = urlResp.url
-                    if (url.isNullOrBlank()) {
-                        stopUnavailable(urlResp.error ?: "这首歌当前不可播放")
+                    if (prepared == null) {
+                        stopUnavailable("这首歌当前不可播放")
                     } else {
-                        startPlayback(song, url, source = urlResp.source)
+                        playPreparedSong(prepared, requestToken)
                     }
                 }.onFailure { e ->
                     if (!isCurrentSongRequest(requestToken, songId)) return@onFailure
@@ -300,8 +327,11 @@ class PlayerViewModel : ViewModel() {
         viewModelScope.launch {
             val resumePosition = player.currentPosition.coerceAtLeast(0)
             val requestToken = playRequestToken
+            preparedQueueItems.clear()
+            songUrlCache.clear()
+            pendingSongUrlRequests.clear()
             _state.value = _state.value.copy(quality = quality, isLoading = true, error = null)
-            repo.getSongUrl(songId, quality.bitrate, currentSong.fee).onSuccess { urlResp ->
+            repo.getSongUrlWithFallbackTimeout(songId, quality.bitrate, currentSong.fee).onSuccess { urlResp ->
                 if (!isCurrentSongRequest(requestToken, songId)) return@onSuccess
                 val url = urlResp.url
                 if (url.isNullOrBlank()) {
@@ -371,6 +401,61 @@ class PlayerViewModel : ViewModel() {
         }
     }
 
+    private fun scheduleBufferingFallback() {
+        val song = _state.value.currentSong ?: return
+        if (_state.value.audioSource != "netease") return
+        val requestToken = playRequestToken
+        bufferingFallbackJob?.cancel()
+        bufferingFallbackJob = viewModelScope.launch {
+            delay(BUFFERING_FALLBACK_TIMEOUT_MS)
+            if (!isCurrentSongRequest(requestToken, song.id)) return@launch
+            if (player.playbackState != Player.STATE_BUFFERING) return@launch
+            switchToBackupSource(song.id, requestToken, "网易云音源加载超时，正在切换备用音源")
+        }
+    }
+
+    private fun switchToBackupSource(songId: Long, requestToken: Long, message: String) {
+        if (!isCurrentSongRequest(requestToken, songId)) return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(isLoading = true, error = message)
+            repo.getBackupSongUrl(songId, _state.value.quality.bitrate).onSuccess { urlResp ->
+                if (!isCurrentSongRequest(requestToken, songId)) return@onSuccess
+                val url = urlResp.url
+                val song = _state.value.currentSong
+                if (url.isNullOrBlank() || song == null) {
+                    _state.value = _state.value.copy(
+                        isLoading = false,
+                        isPlaying = player.isPlaying,
+                        error = urlResp.error ?: "备用音源暂时不可用"
+                    )
+                    return@onSuccess
+                }
+                val prepared = PreparedQueueItem(song, url, urlResp.source)
+            preparedQueueItems[songId] = prepared
+            transientBackupSongId = songId
+            songUrlCache.remove(UrlCacheKey(songId, _state.value.quality.bitrate))
+                progressJob?.cancel()
+                _state.value = _state.value.copy(
+                    currentSong = prepared.song,
+                    songUrl = prepared.url,
+                    audioSource = prepared.source,
+                    duration = prepared.song.dt,
+                    isPlaying = false,
+                    isLoading = true,
+                    error = null
+                )
+                startPlayback(prepared.song, prepared.url, source = prepared.source, reuseExistingQueue = false)
+            }.onFailure { e ->
+                if (!isCurrentSongRequest(requestToken, songId)) return@onFailure
+                _state.value = _state.value.copy(
+                    isLoading = false,
+                    isPlaying = player.isPlaying,
+                    error = e.message ?: "备用音源暂时不可用"
+                )
+            }
+        }
+    }
+
     private fun savedQuality(): PlaybackQuality {
         return PlaybackQuality.entries.firstOrNull { it.name == session.playbackQuality } ?: PlaybackQuality.STANDARD
     }
@@ -395,6 +480,7 @@ class PlayerViewModel : ViewModel() {
 
     private fun playFromQueue(index: Int) {
         val song = playQueue.getOrNull(index) ?: return
+        clearTransientBackupIfLeaving(song.id)
         val current = _state.value
         if (current.currentSong?.id == song.id && !current.songUrl.isNullOrBlank()) {
             if (!player.isPlaying) player.play()
@@ -403,9 +489,13 @@ class PlayerViewModel : ViewModel() {
 
         val requestToken = ++playRequestToken
         playRequestJob?.cancel()
-        queuePrefetchJob?.cancel()
         playRequestJob = viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
+            delay(PLAY_REQUEST_DEBOUNCE_MS)
+            if (!isActivePlayRequest(requestToken)) return@launch
+            if (seekToQueuedSong(song.id)) {
+                return@launch
+            }
             preparedQueueItems[song.id]?.let { prepared ->
                 playPreparedSong(prepared, requestToken)
                 return@launch
@@ -443,9 +533,6 @@ class PlayerViewModel : ViewModel() {
     private suspend fun playKnownSong(song: Song, requestToken: Long) {
         val songId = song.id
         if (!isActivePlayRequest(requestToken)) return
-        progressJob?.cancel()
-        player.stop()
-        player.clearMediaItems()
         _state.value = _state.value.copy(
             currentSong = song,
             songUrl = null,
@@ -460,13 +547,12 @@ class PlayerViewModel : ViewModel() {
             isLikeUpdating = false
         )
         refreshLiked(songId)
-        repo.getSongUrl(songId, _state.value.quality.bitrate, song.fee).onSuccess { urlResp ->
+        resolvePreparedSong(song, _state.value.quality.bitrate).onSuccess { prepared ->
             if (!isCurrentSongRequest(requestToken, songId)) return@onSuccess
-            val url = urlResp.url
-            if (url.isNullOrBlank()) {
-                stopUnavailable(urlResp.error ?: "\u8fd9\u9996\u6b4c\u5f53\u524d\u4e0d\u53ef\u64ad\u653e")
+            if (prepared == null) {
+                stopUnavailable("\u8fd9\u9996\u6b4c\u5f53\u524d\u4e0d\u53ef\u64ad\u653e")
             } else {
-                startPlayback(song, url, source = urlResp.source)
+                playPreparedSong(prepared, requestToken)
             }
         }.onFailure { e ->
             if (!isCurrentSongRequest(requestToken, songId)) return@onFailure
@@ -482,9 +568,8 @@ class PlayerViewModel : ViewModel() {
     private fun playPreparedSong(prepared: PreparedQueueItem, requestToken: Long) {
         if (!isActivePlayRequest(requestToken)) return
         currentIndex = playQueue.indexOfFirst { it.id == prepared.song.id }.takeIf { it >= 0 } ?: currentIndex
+        if (seekToQueuedSong(prepared.song.id)) return
         progressJob?.cancel()
-        player.stop()
-        player.clearMediaItems()
         _state.value = _state.value.copy(
             currentSong = prepared.song,
             songUrl = prepared.url,
@@ -499,29 +584,39 @@ class PlayerViewModel : ViewModel() {
             isLikeUpdating = false
         )
         refreshLiked(prepared.song.id)
-        startPlayback(prepared.song, prepared.url, source = prepared.source)
+        startPlayback(
+            prepared.song,
+            prepared.url,
+            source = prepared.source,
+            reuseExistingQueue = playQueue.any { it.id == prepared.song.id }
+        )
         loadLyric(prepared.song.id)
     }
 
-    private fun startPlayback(song: Song, url: String, startPosition: Long = 0, source: String = "netease") {
+    private fun startPlayback(
+        song: Song,
+        url: String,
+        startPosition: Long = 0,
+        source: String = "netease",
+        reuseExistingQueue: Boolean = false
+    ) {
+        bufferingFallbackJob?.cancel()
         progressJob?.cancel()
         AppPlayer.updateCurrentPlayback(song, source)
         AppPlayer.startPlaybackService(app)
         AppPlayer.refreshPlaybackNotification(app)
-        player.stop()
-        player.clearMediaItems()
-        player.setMediaItem(AppPlayer.mediaItem(song, url, source))
-        appendPreparedQueue(song.id)
-        player.prepare()
-        if (startPosition > 0) {
-            player.seekTo(startPosition)
+        val switchedInQueue = reuseExistingQueue && switchToQueueItem(song, url, source, startPosition)
+        if (!switchedInQueue) {
+            player.setMediaItems(buildPlaybackQueue(song, url, source), 0, startPosition.coerceAtLeast(0))
+            player.prepare()
+            player.playWhenReady = true
         }
-        player.playWhenReady = true
         _state.value = _state.value.copy(songUrl = url, audioSource = source, isLoading = true, error = null)
         prefetchQueueAfter(song.id)
     }
 
     private fun stopUnavailable(message: String) {
+        bufferingFallbackJob?.cancel()
         progressJob?.cancel()
         player.stop()
         player.clearMediaItems()
@@ -550,27 +645,141 @@ class PlayerViewModel : ViewModel() {
     private fun prefetchQueueAfter(songId: Long) {
         if (playQueue.size <= 1) return
         if (queuePrefetchJob?.isActive == true) {
-            appendPreparedQueue(songId)
-            return
+            if (queuePrefetchAnchorSongId != songId) {
+                queuePrefetchJob?.cancel()
+            } else {
+                appendPreparedQueue(songId)
+                return
+            }
         }
+        queuePrefetchAnchorSongId = songId
         queuePrefetchJob = viewModelScope.launch {
+            delay(QUEUE_PREFETCH_START_DELAY_MS)
+            if (_state.value.currentSong?.id != songId) return@launch
+            appendPreparedQueue(songId)
+
             val startIndex = playQueue.indexOfFirst { it.id == songId }.takeIf { it >= 0 } ?: currentIndex
+            val bitrate = _state.value.quality.bitrate
             val songsToPrepare = (1..PREPARED_QUEUE_WINDOW).mapNotNull { offset ->
                 playQueue.getOrNull((startIndex + offset) % playQueue.size)
             }.filterNot { it.id == songId }
                 .distinctBy { it.id }
 
             for (song in songsToPrepare) {
-                if (preparedQueueItems.containsKey(song.id)) continue
-                repo.getSongUrl(song.id, _state.value.quality.bitrate, song.fee).onSuccess { urlResp ->
-                    val url = urlResp.url ?: return@onSuccess
-                    preparedQueueItems[song.id] = PreparedQueueItem(song, url, urlResp.source)
-                    appendPreparedQueue(_state.value.currentSong?.id ?: return@onSuccess)
+                if (_state.value.currentSong?.id != songId) break
+                if (preparedQueueItems.containsKey(song.id) || songUrlCache.containsKey(UrlCacheKey(song.id, bitrate))) continue
+                resolvePreparedSong(song, bitrate).onSuccess { prepared ->
+                    if (prepared == null) return@onSuccess
+                    if (_state.value.currentSong?.id == songId) {
+                        appendPreparedQueue(songId)
+                    }
                 }.onFailure { e ->
                     Log.w(TAG, "prefetch failed song=${song.id}: ${e.message}")
                 }
+                delay(QUEUE_PREFETCH_REQUEST_DELAY_MS)
             }
         }
+    }
+
+    private suspend fun resolvePreparedSong(song: Song, bitrate: Int): Result<PreparedQueueItem?> {
+        val key = UrlCacheKey(song.id, bitrate)
+        songUrlCache[key]?.let { cached ->
+            preparedQueueItems[song.id] = cached
+            return Result.success(cached)
+        }
+        pendingSongUrlRequests[key]?.let { pending ->
+            return pending.await().also { result ->
+                result.getOrNull()?.let { prepared -> preparedQueueItems[song.id] = prepared }
+            }
+        }
+
+        val request = viewModelScope.async {
+            repo.getSongUrlWithFallbackTimeout(song.id, bitrate, song.fee).map { urlResp ->
+                val url = urlResp.url ?: return@map null
+                PreparedQueueItem(song, url, urlResp.source).also { prepared ->
+                    if (prepared.source == "netease") {
+                        songUrlCache[key] = prepared
+                    } else if (_state.value.currentSong?.id == song.id) {
+                        transientBackupSongId = song.id
+                    }
+                    preparedQueueItems[song.id] = prepared
+                }
+            }
+        }
+        pendingSongUrlRequests[key] = request
+        return try {
+            request.await()
+        } finally {
+            if (pendingSongUrlRequests[key] === request) {
+                pendingSongUrlRequests.remove(key)
+            }
+        }
+    }
+
+    private fun seekToQueuedSong(songId: Long): Boolean {
+        if (transientBackupSongId == songId) return false
+        val targetIndex = (0 until player.mediaItemCount)
+            .firstOrNull { index -> player.getMediaItemAt(index).mediaId.toLongOrNull() == songId }
+            ?: return false
+
+        _state.value = _state.value.copy(isLoading = true, error = null)
+        currentIndex = playQueue.indexOfFirst { it.id == songId }.takeIf { it >= 0 } ?: currentIndex
+        player.seekTo(targetIndex, 0)
+        if (player.playbackState == Player.STATE_IDLE) {
+            player.prepare()
+        }
+        player.playWhenReady = true
+        return true
+    }
+
+    private fun clearTransientBackupIfLeaving(nextSongId: Long) {
+        val backupSongId = transientBackupSongId ?: return
+        if (backupSongId == nextSongId) return
+        preparedQueueItems[backupSongId]?.takeIf { it.source != "netease" }?.let {
+            preparedQueueItems.remove(backupSongId)
+        }
+        (player.mediaItemCount - 1 downTo 0)
+            .firstOrNull { index -> player.getMediaItemAt(index).mediaId.toLongOrNull() == backupSongId }
+            ?.takeIf { index -> index != player.currentMediaItemIndex }
+            ?.let(player::removeMediaItem)
+        transientBackupSongId = null
+    }
+
+    private fun switchToQueueItem(song: Song, url: String, source: String, startPosition: Long): Boolean {
+        if (player.mediaItemCount == 0 || player.currentMediaItem == null) return false
+        if (transientBackupSongId == song.id) return false
+
+        val existingIndex = (0 until player.mediaItemCount)
+            .firstOrNull { index -> player.getMediaItemAt(index).mediaId.toLongOrNull() == song.id }
+        val targetIndex = existingIndex ?: run {
+            val currentPlayerIndex = player.currentMediaItemIndex.takeIf { it >= 0 } ?: 0
+            val insertIndex = (currentPlayerIndex + 1).coerceIn(0, player.mediaItemCount)
+            player.addMediaItem(insertIndex, AppPlayer.mediaItem(song, url, source))
+            insertIndex
+        }
+
+        player.seekTo(targetIndex, startPosition.coerceAtLeast(0))
+        if (player.playbackState == Player.STATE_IDLE) {
+            player.prepare()
+        }
+        player.playWhenReady = true
+        return true
+    }
+
+    private fun buildPlaybackQueue(song: Song, url: String, source: String): List<MediaItem> {
+        val startIndex = playQueue.indexOfFirst { it.id == song.id }.takeIf { it >= 0 } ?: currentIndex
+        val mediaItems = mutableListOf(AppPlayer.mediaItem(song, url, source))
+        (1..PREPARED_QUEUE_WINDOW)
+            .mapNotNull { offset -> playQueue.getOrNull((startIndex + offset) % playQueue.size) }
+            .filter { it.id != song.id }
+            .distinctBy { it.id }
+            .mapNotNull { nextSong ->
+                preparedQueueItems[nextSong.id]?.let { prepared ->
+                    AppPlayer.mediaItem(prepared.song, prepared.url, prepared.source)
+                }
+            }
+            .forEach(mediaItems::add)
+        return mediaItems
     }
 
     private fun appendPreparedQueue(currentSongId: Long) {
@@ -619,6 +828,7 @@ class PlayerViewModel : ViewModel() {
         playRequestJob?.cancel()
         progressJob?.cancel()
         queuePrefetchJob?.cancel()
+        bufferingFallbackJob?.cancel()
         player.removeListener(playerListener)
         if (_state.value.songUrl.isNullOrBlank()) {
             AppPlayer.stopPlaybackService(app)

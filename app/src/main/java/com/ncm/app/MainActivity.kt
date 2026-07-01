@@ -56,6 +56,7 @@ import coil.compose.AsyncImage
 import com.ncm.app.ui.navigation.NavGraph
 import com.ncm.app.ui.navigation.Routes
 import com.ncm.app.ui.theme.*
+import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.PlayerViewModel
 import kotlinx.coroutines.delay
@@ -420,7 +421,7 @@ fun MiniPlayer(
                 contentAlignment = Alignment.Center
             ) {
                 if (!coverUrl.isNullOrBlank()) {
-                    AsyncImage(coverUrl, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                    AsyncImage(sizedImageUrl(coverUrl, 120), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                 }
             }
 

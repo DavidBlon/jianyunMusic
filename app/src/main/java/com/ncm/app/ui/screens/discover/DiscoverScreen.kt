@@ -42,6 +42,7 @@ import com.ncm.app.data.model.PinnedPlaylist
 import com.ncm.app.data.model.Song
 import com.ncm.app.data.model.UserProfile
 import com.ncm.app.ui.theme.*
+import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
 import kotlinx.coroutines.delay
 
@@ -91,7 +92,7 @@ private fun Header(profile: UserProfile?) {
             contentAlignment = Alignment.Center
         ) {
             if (!profile?.avatar.isNullOrBlank()) {
-                AsyncImage(profile?.avatar, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                AsyncImage(sizedImageUrl(profile?.avatar, 120), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else {
                 Icon(androidx.compose.material.icons.Icons.Outlined.Person, null, tint = TextPrimary, modifier = Modifier.size(22.dp))
             }
@@ -288,7 +289,7 @@ private fun NewSongCoverStack(newSongs: List<Song>) {
             ) {
                 val albumUrl = song.album?.picUrl
                 if (!albumUrl.isNullOrBlank()) {
-                    AsyncImage(albumUrl, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                    AsyncImage(sizedImageUrl(albumUrl, 180), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                 }
                 if (index == 0) {
                     Text(
@@ -379,7 +380,7 @@ private fun PlaylistCard(playlist: PinnedPlaylist, onClick: () -> Unit) {
     Column(modifier = Modifier.width(118.dp).clickable(onClick = onClick)) {
         Box(modifier = Modifier.size(118.dp).clip(RoundedCornerShape(10.dp)).background(DarkSurface)) {
             if (!playlist.picUrl.isNullOrBlank()) {
-                AsyncImage(playlist.picUrl, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                AsyncImage(sizedImageUrl(playlist.picUrl, 260), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             }
             Text(
                 text = formatPlayCount(playlist.playCount),
@@ -412,7 +413,7 @@ private fun SongCard(song: Song, onClick: () -> Unit) {
         Box(modifier = Modifier.size(118.dp).clip(RoundedCornerShape(10.dp)).background(DarkSurface)) {
             val albumUrl = song.album?.picUrl
             if (!albumUrl.isNullOrBlank()) {
-                AsyncImage(albumUrl, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                AsyncImage(sizedImageUrl(albumUrl, 260), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             }
         }
         Text(song.name, style = MaterialTheme.typography.bodySmall, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp))

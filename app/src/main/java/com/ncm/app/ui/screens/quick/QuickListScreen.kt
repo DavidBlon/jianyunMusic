@@ -20,6 +20,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.ncm.app.data.model.QuickEntry
 import com.ncm.app.ui.theme.*
+import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
 
 @Composable
@@ -106,7 +107,7 @@ private fun QuickEntryRow(
             contentAlignment = Alignment.Center
         ) {
             if (!entry.imageUrl.isNullOrBlank()) {
-                AsyncImage(entry.imageUrl, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                AsyncImage(sizedImageUrl(entry.imageUrl, 140), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else if (isSong) {
                 Icon(androidx.compose.material.icons.Icons.Outlined.PlayArrow, null, tint = TextTertiary)
             }
