@@ -192,6 +192,11 @@ class PlayerViewModel : ViewModel() {
 
     fun play(songId: Long) {
         val current = _state.value
+        if (hasActiveMediaFor(songId)) {
+            if (!player.isPlaying) player.play()
+            restoreFromActivePlayer()
+            return
+        }
         if (current.currentSong?.id == songId && !current.songUrl.isNullOrBlank()) {
             if (!player.isPlaying) player.play()
             return
@@ -248,12 +253,25 @@ class PlayerViewModel : ViewModel() {
 
     fun open(songId: Long) {
         val current = _state.value
+        if (hasActiveMediaFor(songId)) {
+            restoreFromActivePlayer()
+            return
+        }
         if (current.currentSong?.id == songId && !current.songUrl.isNullOrBlank()) return
         play(songId)
     }
 
     fun togglePlay() {
         if (_state.value.songUrl.isNullOrBlank()) {
+            if (hasActiveMedia()) {
+                if (player.isPlaying) {
+                    player.pause()
+                } else {
+                    player.play()
+                }
+                restoreFromActivePlayer()
+                return
+            }
             _state.value.currentSong?.let { play(it.id) }
             return
         }
@@ -525,9 +543,16 @@ class PlayerViewModel : ViewModel() {
         playQueue.indexOfFirst { it.id == song.id }
             .takeIf { it >= 0 }
             ?.let { currentIndex = it }
-        refreshLiked(song.id)
-        loadLyric(song.id)
         if (player.isPlaying) startProgressUpdates()
+    }
+
+    private fun hasActiveMedia(): Boolean {
+        return !player.currentMediaItem?.localConfiguration?.uri?.toString().isNullOrBlank()
+    }
+
+    private fun hasActiveMediaFor(songId: Long): Boolean {
+        val mediaId = player.currentMediaItem?.mediaId?.toLongOrNull()
+        return mediaId == songId && hasActiveMedia()
     }
 
     private suspend fun playKnownSong(song: Song, requestToken: Long) {
@@ -767,8 +792,10 @@ class PlayerViewModel : ViewModel() {
     }
 
     private fun buildPlaybackQueue(song: Song, url: String, source: String): List<MediaItem> {
-        val startIndex = playQueue.indexOfFirst { it.id == song.id }.takeIf { it >= 0 } ?: currentIndex
         val mediaItems = mutableListOf(AppPlayer.mediaItem(song, url, source))
+        if (playQueue.isEmpty()) return mediaItems
+
+        val startIndex = playQueue.indexOfFirst { it.id == song.id }.takeIf { it >= 0 } ?: currentIndex
         (1..PREPARED_QUEUE_WINDOW)
             .mapNotNull { offset -> playQueue.getOrNull((startIndex + offset) % playQueue.size) }
             .filter { it.id != song.id }

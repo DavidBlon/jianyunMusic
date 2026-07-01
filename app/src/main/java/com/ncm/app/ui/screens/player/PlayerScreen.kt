@@ -2,6 +2,7 @@ package com.ncm.app.ui.screens.player
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -115,14 +116,20 @@ fun PlayerScreen(
                     currentPosition = state.currentPosition,
                     modifier = Modifier
                         .fillMaxSize()
-                        .clickable { showLyrics = false }
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { showLyrics = false }
                 )
             } else {
                 Disc(
                     coverUrl = state.currentSong?.album?.picUrl,
                     isPlaying = state.isPlaying,
                     rotation = rotation,
-                    modifier = Modifier.clickable { showLyrics = true }
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { showLyrics = true }
                 )
             }
         }

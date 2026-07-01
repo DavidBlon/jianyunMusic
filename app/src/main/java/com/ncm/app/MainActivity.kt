@@ -397,6 +397,9 @@ fun MiniPlayer(
     modifier: Modifier = Modifier
 ) {
     val visibleProgress = progress.coerceIn(0f, 1f)
+    val previousInteractionSource = remember { MutableInteractionSource() }
+    val playPauseInteractionSource = remember { MutableInteractionSource() }
+    val nextInteractionSource = remember { MutableInteractionSource() }
 
     Box(
         modifier = modifier
@@ -437,7 +440,13 @@ fun MiniPlayer(
                     imageVector = androidx.compose.material.icons.Icons.Outlined.SkipPrevious,
                     contentDescription = null,
                     tint = TextPrimary,
-                    modifier = Modifier.size(22.dp).clickable(onClick = onPrevious)
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clickable(
+                            interactionSource = previousInteractionSource,
+                            indication = null,
+                            onClick = onPrevious
+                        )
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Box(
@@ -445,7 +454,11 @@ fun MiniPlayer(
                         .size(34.dp)
                         .clip(CircleShape)
                         .background(Green500)
-                        .clickable(onClick = onPlayPause),
+                        .clickable(
+                            interactionSource = playPauseInteractionSource,
+                            indication = null,
+                            onClick = onPlayPause
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -460,7 +473,13 @@ fun MiniPlayer(
                     imageVector = androidx.compose.material.icons.Icons.Outlined.SkipNext,
                     contentDescription = null,
                     tint = TextPrimary,
-                    modifier = Modifier.size(22.dp).clickable(onClick = onNext)
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clickable(
+                            interactionSource = nextInteractionSource,
+                            indication = null,
+                            onClick = onNext
+                        )
                 )
             }
         }
