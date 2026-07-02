@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.media3.common.C
@@ -26,6 +27,7 @@ import java.io.File
 
 object AppPlayer {
     private const val TAG = "AppPlayer"
+    private const val MEDIA_EXTRA_SOURCE = "com.ncm.app.media.SOURCE"
 
     private data class PlaybackSnapshot(
         val song: Song,
@@ -119,12 +121,18 @@ object AppPlayer {
 
     fun currentSource(): String = currentSource
 
+    fun sourceFor(mediaItem: MediaItem?): String? {
+        return mediaItem?.mediaMetadata?.extras?.getString(MEDIA_EXTRA_SOURCE)
+            ?: mediaItem?.mediaId?.toLongOrNull()?.let { mediaSnapshots[it]?.source }
+    }
+
     fun syncCurrentFromPlayer() {
         val player = exoPlayer ?: return
-        val mediaId = player.currentMediaItem?.mediaId?.toLongOrNull() ?: return
+        val mediaItem = player.currentMediaItem ?: return
+        val mediaId = mediaItem.mediaId.toLongOrNull() ?: return
         val snapshot = mediaSnapshots[mediaId] ?: return
         currentSong = snapshot.song
-        currentSource = snapshot.source
+        currentSource = sourceFor(mediaItem) ?: snapshot.source
     }
 
     fun refreshPlaybackNotification(context: Context) {
@@ -161,6 +169,7 @@ object AppPlayer {
             .setArtist(song.artistText)
             .setAlbumTitle(song.album?.name)
             .setArtworkUri(sizedImageUrl(song.album?.picUrl, 300)?.let(Uri::parse))
+            .setExtras(Bundle().apply { putString(MEDIA_EXTRA_SOURCE, source) })
             .build()
 
         return MediaItem.Builder()

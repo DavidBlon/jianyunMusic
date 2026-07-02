@@ -1,124 +1,87 @@
 # NeteaseCloudMusicForMe
 
-一款基于 **Kotlin + Jetpack Compose** 的第三方网易云音乐 Android 客户端，配有 Node.js 代理服务，支持 UnblockNeteaseMusic 音源替代。
+一个基于 **Kotlin + Jetpack Compose** 的第三方网易云音乐 Android 客户端，支持发现、搜索、歌单、登录、播放、歌词、喜欢歌曲同步，以及受限歌曲的备用音源播放。
 
-## 截图
+## 最近修复
 
-| | | |
-|---|---|---|
-| <img src="design/icon.png" width="120"/> | ![Mockup](design/ui-mockup.html) | |
+- 修复备用音源播放后，听完歌曲再切回同一首歌时复用旧备用 URL、没有重新加载音源的问题。
+- 修复同一首歌在官方音源和备用音源之间切换时，播放器顶部音源标识丢失的问题。
+- 每个播放器队列项现在会保存自己的音源标识，避免同一首歌的不同音源互相覆盖状态。
 
-> 更多设计稿见 [design/](design/) 目录。
-
-## 功能特性
+## 功能
 
 ### Android 客户端 (`app/`)
-- **发现页** — 个性化推荐、歌单、排行榜
-- **搜索** — 歌曲、歌单搜索
-- **播放器** — 完整播放控制（播放/暂停/上一首/下一首/进度拖拽）
-- **播放模式** — 顺序播放、单曲循环、随机播放
-- **歌单管理** — 查看歌单详情、收藏/取消收藏
-- **登录** — 二维码扫码登录
-- **个人 FM** — 私人电台
-- **歌词展示** — 逐行/逐字歌词同步
-- **下载管理** — 歌曲缓存下载
 
-### Node.js 后端 (`server.js`)
-- 基于 [NeteaseCloudMusicApi](https://github.com/Binaryify/NeteaseCloudMusicApi) v4，提供完整 API 代理
-- 支持登录态持久化（Cookie 文件存储）
-- 自动音源替换 — 为灰化/受限歌曲从其他平台寻找替代播放源
+- 发现页：推荐内容、歌单、排行榜、新歌入口。
+- 搜索：支持歌曲、歌单等内容搜索。
+- 播放器：播放、暂停、上一首、下一首、进度拖动、封面和歌词展示。
+- 播放模式：顺序播放、单曲循环、随机播放。
+- 音质选择：标准、较高、极高、无损。
+- 备用音源：网易云音源不可用或加载超时时，尝试切换可用备用源。
+- 登录：支持网易云账号登录态相关能力。
+- 喜欢歌曲：在播放器内喜欢/取消喜欢，并同步真实账号状态。
+- 后台播放：Media3 ExoPlayer、前台播放服务和系统通知栏控制。
 
-### 音源替换 (`unblock.js`)
-参考 [UnblockNeteaseMusic](https://github.com/nondanee/UnblockNeteaseMusic) 实现：
-| 提供商 | 状态 |
-|--------|------|
-| **酷狗 (kugou)** | ✅ 完全正常 |
-| QQ 音乐 | ⚠️ 搜索可用，播放接口已封锁 |
-| 咪咕 (migu) | ❌ 已失效 |
-| 酷我 (kuwo) | ❌ 已封锁 |
+### 本地 Node 服务
+
+仓库仍保留 `server.js` 和 `unblock.js`，用于本地 API 代理和音源替代实验。当前 Android 端主要通过 Kotlin 网络层直接请求所需接口。
 
 ## 技术栈
 
 ### Android
-- **语言**: Kotlin
-- **UI**: Jetpack Compose + Material 3
-- **架构**: ViewModel + Repository 模式
-- **网络**: Retrofit / OkHttp
-- **构建**: Gradle 8.2 + AGP 8.2.2 + Kotlin 2.0
 
-### 后端
-- **运行时**: Node.js
-- **核心依赖**: NeteaseCloudMusicApi ^4.0.25
-- **端口**: 3000（默认）
+- Kotlin
+- Jetpack Compose + Material 3
+- ViewModel + Repository
+- Retrofit / OkHttp
+- Media3 ExoPlayer
+- Gradle 8.4 / AGP 8.2.2 / Kotlin 2.0
 
-## 快速开始
+### Node
 
-### 1. 启动后端服务
+- Node.js
+- NeteaseCloudMusicApi
+- 本地默认端口：`3000`
 
-```bash
-# 安装依赖
-npm install
+## 构建
 
-# 启动 API 代理服务
-npm start
-# 默认监听 http://0.0.0.0:3000
+使用 Android Studio 打开项目根目录并同步 Gradle，或在命令行执行：
+
+```powershell
+$env:JAVA_HOME='D:\Android Studio\jbr'
+$env:PATH="$env:JAVA_HOME\bin;$env:PATH"
+.\gradlew.bat --no-daemon assembleDebug
 ```
 
-### 2. 构建 Android 客户端
+APK 输出位置：
 
-用 Android Studio 打开项目根目录，同步 Gradle 后直接运行 `app` 模块。
-
-或命令行：
-```bash
-./gradlew assembleDebug
+```text
+app/build/outputs/apk/debug/app-debug.apk
 ```
-
-APK 输出位置：`app/build/outputs/apk/debug/`
 
 ## 项目结构
 
-```
-├── app/                          # Android 客户端
-│   ├── src/main/
-│   │   ├── java/com/ncm/app/
-│   │   │   ├── data/
-│   │   │   │   ├── api/          # 网络接口定义
-│   │   │   │   ├── model/        # 数据模型
-│   │   │   │   └── repository/   # 数据仓库
-│   │   │   ├── playback/         # 音乐播放服务
-│   │   │   ├── ui/
-│   │   │   │   ├── navigation/   # 导航图
-│   │   │   │   ├── screens/      # 各页面
-│   │   │   │   │   ├── discover/ # 发现页
-│   │   │   │   │   ├── login/    # 登录
-│   │   │   │   │   ├── my/       # 我的
-│   │   │   │   │   ├── player/   # 播放器
-│   │   │   │   │   ├── playlist/ # 歌单详情
-│   │   │   │   │   ├── quick/    # 快捷列表
-│   │   │   │   │   └── search/   # 搜索
-│   │   │   │   └── theme/        # 主题
-│   │   │   └── viewmodel/        # ViewModel
-│   │   └── res/                  # 资源文件
-│   └── build.gradle.kts
-├── server.js                     # API 代理服务
-├── unblock.js                    # 音源替换模块
-├── design/                       # 设计稿 & 素材
-├── package.json
-├── build.gradle.kts              # 根构建配置
-└── settings.gradle.kts
+```text
+app/
+  src/main/java/com/ncm/app/
+    data/
+      api/          网络接口
+      model/        数据模型
+      repository/   数据仓库与音源处理
+    playback/       播放器、播放服务、通知栏
+    ui/
+      navigation/   导航
+      screens/      各页面
+      theme/        主题
+    viewmodel/      页面与播放状态
+server.js           本地 API 代理
+unblock.js          备用音源实验模块
+design/             设计素材
 ```
 
-## 配置
+## 说明
 
-### 后端端口
-```bash
-# 可通过环境变量修改
-export PORT=4000
-npm start
-```
-
-### Android 端 API 地址
-在 `NeteaseApi.kt` 中修改 `BASE_URL` 为你的后端地址。
+本项目用于学习和个人使用。播放能力依赖网易云接口和可用音源状态，部分歌曲可能因版权、会员、地区或接口限制无法播放。
 
 ## 许可
 

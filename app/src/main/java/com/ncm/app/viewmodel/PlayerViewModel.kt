@@ -138,7 +138,11 @@ class PlayerViewModel : ViewModel() {
             clearTransientBackupIfLeaving(songId)
             val prepared = preparedQueueItems[songId]
                 ?: playQueue.firstOrNull { it.id == songId }?.let { song ->
-                    PreparedQueueItem(song, mediaItem.localConfiguration?.uri.toString(), "netease")
+                    PreparedQueueItem(
+                        song,
+                        mediaItem.localConfiguration?.uri.toString(),
+                        AppPlayer.sourceFor(mediaItem) ?: "netease"
+                    )
                 }
                 ?: return
 
@@ -530,7 +534,7 @@ class PlayerViewModel : ViewModel() {
         _state.value = _state.value.copy(
             currentSong = song,
             songUrl = url,
-            audioSource = AppPlayer.currentSource(),
+            audioSource = AppPlayer.sourceFor(player.currentMediaItem) ?: AppPlayer.currentSource(),
             duration = player.duration.takeIf { it > 0 } ?: song.dt,
             isPlaying = player.isPlaying,
             isLoading = player.playbackState == Player.STATE_BUFFERING,
@@ -593,7 +597,7 @@ class PlayerViewModel : ViewModel() {
     private fun playPreparedSong(prepared: PreparedQueueItem, requestToken: Long) {
         if (!isActivePlayRequest(requestToken)) return
         currentIndex = playQueue.indexOfFirst { it.id == prepared.song.id }.takeIf { it >= 0 } ?: currentIndex
-        if (seekToQueuedSong(prepared.song.id)) return
+        if (seekToQueuedSong(prepared.song.id, prepared.url, prepared.source)) return
         progressJob?.cancel()
         _state.value = _state.value.copy(
             currentSong = prepared.song,
@@ -741,11 +745,14 @@ class PlayerViewModel : ViewModel() {
         }
     }
 
-    private fun seekToQueuedSong(songId: Long): Boolean {
+    private fun seekToQueuedSong(songId: Long, expectedUrl: String? = null, expectedSource: String? = null): Boolean {
         if (transientBackupSongId == songId) return false
         val targetIndex = (0 until player.mediaItemCount)
             .firstOrNull { index -> player.getMediaItemAt(index).mediaId.toLongOrNull() == songId }
             ?: return false
+        val targetItem = player.getMediaItemAt(targetIndex)
+        if (expectedUrl != null && targetItem.localConfiguration?.uri?.toString() != expectedUrl) return false
+        if (expectedSource != null && (AppPlayer.sourceFor(targetItem) ?: "netease") != expectedSource) return false
 
         _state.value = _state.value.copy(isLoading = true, error = null)
         currentIndex = playQueue.indexOfFirst { it.id == songId }.takeIf { it >= 0 } ?: currentIndex
@@ -763,10 +770,11 @@ class PlayerViewModel : ViewModel() {
         preparedQueueItems[backupSongId]?.takeIf { it.source != "netease" }?.let {
             preparedQueueItems.remove(backupSongId)
         }
-        (player.mediaItemCount - 1 downTo 0)
-            .firstOrNull { index -> player.getMediaItemAt(index).mediaId.toLongOrNull() == backupSongId }
-            ?.takeIf { index -> index != player.currentMediaItemIndex }
-            ?.let(player::removeMediaItem)
+        for (index in player.mediaItemCount - 1 downTo 0) {
+            val item = player.getMediaItemAt(index)
+            if (item.mediaId.toLongOrNull() != backupSongId) continue
+            player.removeMediaItem(index)
+        }
         transientBackupSongId = null
     }
 
@@ -774,6 +782,7 @@ class PlayerViewModel : ViewModel() {
         if (player.mediaItemCount == 0 || player.currentMediaItem == null) return false
         if (transientBackupSongId == song.id) return false
 
+        val requestedUrl = url
         val existingIndex = (0 until player.mediaItemCount)
             .firstOrNull { index -> player.getMediaItemAt(index).mediaId.toLongOrNull() == song.id }
         val targetIndex = existingIndex ?: run {
@@ -781,6 +790,14 @@ class PlayerViewModel : ViewModel() {
             val insertIndex = (currentPlayerIndex + 1).coerceIn(0, player.mediaItemCount)
             player.addMediaItem(insertIndex, AppPlayer.mediaItem(song, url, source))
             insertIndex
+        }
+        existingIndex?.let { index ->
+            val existingItem = player.getMediaItemAt(index)
+            val existingUrl = existingItem.localConfiguration?.uri?.toString()
+            val existingSource = AppPlayer.sourceFor(existingItem) ?: "netease"
+            if (existingUrl != requestedUrl || existingSource != source) {
+                player.replaceMediaItem(index, AppPlayer.mediaItem(song, requestedUrl, source))
+            }
         }
 
         player.seekTo(targetIndex, startPosition.coerceAtLeast(0))
