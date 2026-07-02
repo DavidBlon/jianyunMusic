@@ -1,3 +1,4 @@
+// Legacy local proxy kept for manual experiments; Android uses the Kotlin network layer.
 const {
   search,
   cloudsearch,

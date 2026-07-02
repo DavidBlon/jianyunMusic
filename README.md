@@ -2,14 +2,12 @@
 
 一个基于 **Kotlin + Jetpack Compose** 的第三方网易云音乐 Android 客户端，支持发现、搜索、歌单、登录、播放、歌词、喜欢歌曲同步，以及官方音源不可用时的备用音源播放。
 
-## 最近修复
+## 当前重点
 
-- 修复二维码登录后 Cookie 保存不完整，导致大量官方歌曲返回 403、手机号网页登录却能正常播放的问题。
-- 二维码登录成功后会合并二维码会话 Cookie、设备标识 Cookie 和最终 `MUSIC_U` Cookie，避免播放鉴权丢失。
-- 官方音源仍优先使用；播放前会用轻量请求确认官方 CDN 可读，明确 403/404 后才切换备用音源。
-- 播放器媒体请求统一携带 Cookie、Referer、Origin 和网易云桌面 UA，减少官方 CDN 鉴权失败。
-- 调整播放页进度条、拖动圆点和歌词样式，降低视觉厚重感，避免歌词滚动时突然换行。
-- 登录页支持自定义网页登录和二维码登录两种方式。
+- Android 端主路径已经改为 Kotlin 网络层直接访问所需接口，不依赖本地 Node 代理才能运行。
+- 播放优先使用网易云官方音源，官方地址不可读或加载失败时再尝试备用音源。
+- 登录支持网页登录 Cookie 同步和二维码登录，播放请求会携带 Cookie、Referer、Origin 和网易云桌面 UA。
+- 已加入 JVM 单元测试、Android Lint 配置和 GitHub Actions CI，避免只靠人工回归。
 
 ## 功能
 
@@ -26,33 +24,43 @@
 - 喜欢歌曲：在播放器内喜欢/取消喜欢，并同步真实账号状态。
 - 后台播放：Media3 ExoPlayer、前台播放服务和系统通知栏控制。
 
-### 本地 Node 服务
+### Legacy Node 工具 (`tools/legacy-node/`)
 
-仓库仍保留 `server.js` 和 `unblock.js`，用于本地 API 代理和备用音源实验。当前 Android 端主要通过 Kotlin 网络层直接请求所需接口。
+`tools/legacy-node/server.js` 和 `tools/legacy-node/unblock.js` 是早期本地 API 代理和备用音源实验工具。它们不属于当前 Android 主运行路径，仅保留给手动对照、抓接口或回归旧实验使用。
+
+如需启动旧工具：
+
+```powershell
+npm install
+npm start
+```
+
+默认监听端口为 `3000`。
 
 ## 技术栈
-
-### Android
 
 - Kotlin
 - Jetpack Compose + Material 3
 - ViewModel + Repository
 - Retrofit / OkHttp
 - Media3 ExoPlayer
-- Gradle 8.4 / AGP 8.2.2 / Kotlin 2.0
-
-### Node
-
-- Node.js
-- NeteaseCloudMusicApi
-- 本地默认端口：`3000`
+- Gradle / Android Gradle Plugin / Kotlin
+- JUnit 4
 
 ## 构建
 
-使用 Android Studio 打开项目根目录并同步 Gradle，或在命令行执行：
+先确保本机安装 JDK 17。Android Studio 用户可以直接打开项目根目录并同步 Gradle。
+
+命令行构建：
 
 ```powershell
-$env:JAVA_HOME='D:\Android Studio\jbr'
+.\gradlew.bat --no-daemon assembleDebug
+```
+
+如果本机没有全局 JDK，可临时设置自己的 JDK 17 路径，例如：
+
+```powershell
+$env:JAVA_HOME='<your-jdk-17-path>'
 $env:PATH="$env:JAVA_HOME\bin;$env:PATH"
 .\gradlew.bat --no-daemon assembleDebug
 ```
@@ -62,6 +70,31 @@ APK 输出位置：
 ```text
 app/build/outputs/apk/debug/app-debug.apk
 ```
+
+## 质量门禁
+
+本地验证建议至少执行：
+
+```powershell
+.\gradlew.bat --no-daemon testDebugUnitTest lintDebug assembleDebug
+```
+
+当前单元测试覆盖的第一批高风险纯逻辑：
+
+- Repository 策略：Cookie 合并、备用音质映射、不可播放提示优先级。
+- 备用音源匹配：歌名归一化、艺人/时长匹配、误匹配拒绝。
+- 播放队列窗口：空队列、循环窗口、当前歌曲不在队列时的回退。
+- 我的音乐状态：喜欢歌单计数、缓存歌单增删同步。
+
+CI 配置在 `.github/workflows/android.yml`，会在 push 和 pull request 时运行：
+
+```text
+testDebugUnitTest
+lintDebug
+assembleDebug
+```
+
+Lint 规则入口为 `lint.xml`。
 
 ## 项目结构
 
@@ -78,8 +111,8 @@ app/
       screens/      各页面
       theme/        主题
     viewmodel/      页面与播放状态
-server.js           本地 API 代理
-unblock.js          备用音源实验模块
+  src/test/          JVM 单元测试
+tools/legacy-node/  早期本地代理和备用音源实验工具
 design/             设计素材
 ```
 

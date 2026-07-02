@@ -1,10 +1,10 @@
 {
   "name": "ncm-server",
   "version": "1.0.0",
-  "description": "NeteaseCloudMusicForMe - Proxy server with UnblockNeteaseMusic support",
-  "main": "server.js",
+  "description": "Legacy local proxy experiments for NeteaseCloudMusicForMe",
+  "main": "tools/legacy-node/server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node tools/legacy-node/server.js"
   },
   "dependencies": {
     "NeteaseCloudMusicApi": "^4.0.25"

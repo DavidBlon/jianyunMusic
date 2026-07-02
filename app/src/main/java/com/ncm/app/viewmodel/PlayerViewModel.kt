@@ -687,12 +687,13 @@ class PlayerViewModel : ViewModel() {
             if (_state.value.currentSong?.id != songId) return@launch
             appendPreparedQueue(songId)
 
-            val startIndex = playQueue.indexOfFirst { it.id == songId }.takeIf { it >= 0 } ?: currentIndex
             val bitrate = _state.value.quality.bitrate
-            val songsToPrepare = (1..PREPARED_QUEUE_WINDOW).mapNotNull { offset ->
-                playQueue.getOrNull((startIndex + offset) % playQueue.size)
-            }.filterNot { it.id == songId }
-                .distinctBy { it.id }
+            val songsToPrepare = PlaybackQueuePlanner.windowAfter(
+                currentSongId = songId,
+                playQueue = playQueue,
+                currentIndex = currentIndex,
+                windowSize = PREPARED_QUEUE_WINDOW
+            )
 
             for (song in songsToPrepare) {
                 if (_state.value.currentSong?.id != songId) break
@@ -812,11 +813,12 @@ class PlayerViewModel : ViewModel() {
         val mediaItems = mutableListOf(AppPlayer.mediaItem(song, url, source))
         if (playQueue.isEmpty()) return mediaItems
 
-        val startIndex = playQueue.indexOfFirst { it.id == song.id }.takeIf { it >= 0 } ?: currentIndex
-        (1..PREPARED_QUEUE_WINDOW)
-            .mapNotNull { offset -> playQueue.getOrNull((startIndex + offset) % playQueue.size) }
-            .filter { it.id != song.id }
-            .distinctBy { it.id }
+        PlaybackQueuePlanner.windowAfter(
+            currentSongId = song.id,
+            playQueue = playQueue,
+            currentIndex = currentIndex,
+            windowSize = PREPARED_QUEUE_WINDOW
+        )
             .mapNotNull { nextSong ->
                 preparedQueueItems[nextSong.id]?.let { prepared ->
                     AppPlayer.mediaItem(prepared.song, prepared.url, prepared.source)
@@ -828,14 +830,16 @@ class PlayerViewModel : ViewModel() {
 
     private fun appendPreparedQueue(currentSongId: Long) {
         if (playQueue.size <= 1) return
-        val startIndex = playQueue.indexOfFirst { it.id == currentSongId }.takeIf { it >= 0 } ?: currentIndex
         val existingIds = (0 until player.mediaItemCount)
             .mapNotNull { player.getMediaItemAt(it).mediaId.toLongOrNull() }
             .toSet()
-        (1..PREPARED_QUEUE_WINDOW)
-            .mapNotNull { offset -> playQueue.getOrNull((startIndex + offset) % playQueue.size) }
-            .filter { it.id != currentSongId && it.id !in existingIds }
-            .distinctBy { it.id }
+        PlaybackQueuePlanner.windowAfter(
+            currentSongId = currentSongId,
+            playQueue = playQueue,
+            currentIndex = currentIndex,
+            windowSize = PREPARED_QUEUE_WINDOW
+        )
+            .filter { it.id !in existingIds }
             .mapNotNull { song ->
                 preparedQueueItems[song.id]?.let { prepared ->
                     AppPlayer.mediaItem(prepared.song, prepared.url, prepared.source)

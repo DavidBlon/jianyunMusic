@@ -100,21 +100,6 @@ class UnblockManager {
 
     // ==================== 酷狗音乐 ====================
 
-    private data class KugouCandidate(
-        val fileHash: String,
-        val name: String,
-        val duration: Long,
-        val artists: String
-    )
-
-    private data class CandidateScore(
-        val candidate: KugouCandidate,
-        val total: Double,
-        val nameSimilarity: Double,
-        val artistSimilarity: Double,
-        val durationRatio: Double
-    )
-
     private suspend fun kugouSearchAndTrack(info: SongInfo): String? {
         val keyword = buildString {
             append(info.name)
@@ -138,7 +123,7 @@ class UnblockManager {
 
         val candidates = lists.mapNotNull { element ->
             val item = element.asJsonObject
-            KugouCandidate(
+            BackupSongMatcher.Candidate(
                 fileHash = item.get("FileHash")?.asString
                     ?: item.get("hash")?.asString
                     ?: return@mapNotNull null,
@@ -149,7 +134,12 @@ class UnblockManager {
         }
 
         // Step 2: 匹配
-        val matched = matchSong(info, candidates) ?: return null
+        val matched = BackupSongMatcher.selectBest(
+            songName = info.name,
+            artists = info.artists,
+            duration = info.duration,
+            candidates = candidates
+        ) ?: return null
 
         // Step 3: 获取播放地址
         return kugouGetUrl(matched.fileHash)
@@ -162,160 +152,6 @@ class UnblockManager {
         val json = JsonParser.parseString(body).asJsonObject
         val urls = json.getAsJsonArray("url") ?: return null
         return urls.firstOrNull()?.asString
-    }
-
-    // ==================== 歌曲匹配引擎 ====================
-
-    /**
-     * 规范化歌名：去括号后缀、去多余空格、去特殊符号
-     */
-    private fun normalize(str: String): String {
-        return str.lowercase()
-            .replace(Regex("[（(][^）)]*[）)]"), "")             // 去掉所有括号内容
-            .replace(Regex("\\s*(live|伴奏|铃声|完整版|纯音乐|instrumental|cover|remix|版|ver\\.?)\\s*"), " ")
-            .replace(Regex("[\\s　]+"), " ")
-            .replace(Regex("[，。！？、；：\"\"''【】《》\\-–—·～&@#\$%^*+=\\\\|<>?/]+"), " ")
-            .trim()
-    }
-
-    /**
-     * 基于字符级别的 Jaccard 相似度（更适用于中文）
-     */
-    private fun charSimilarity(a: String, b: String): Double {
-        val na = normalize(a); val nb = normalize(b)
-        if (na.isEmpty() || nb.isEmpty()) return 0.0
-
-        // 如果归一化后相等，直接满分
-        if (na == nb) return 1.0
-        // 一方包含另一方，高分
-        if (na.contains(nb) || nb.contains(na)) return 0.9
-
-        val setA = na.replace(" ", "").toSet()
-        val setB = nb.replace(" ", "").toSet()
-        if (setA.isEmpty() || setB.isEmpty()) return 0.0
-
-        val inter = setA.intersect(setB).size.toDouble()
-        val union = setA.union(setB).size.toDouble()
-        if (union == 0.0) return 0.0
-        return inter / union
-    }
-
-    /**
-     * 逐个字符顺序匹配比率（按位置比较两首歌名的相似度）
-     * 防止字完全不同的歌因为字符集相似而误匹配
-     */
-    private fun sequentialSimilarity(a: String, b: String): Double {
-        val na = normalize(a); val nb = normalize(b)
-        if (na.isEmpty() || nb.isEmpty()) return 0.0
-        if (na == nb) return 1.0
-        if (na.contains(nb) || nb.contains(na)) return 0.85
-
-        val sa = na.replace(" ", "")
-        val sb = nb.replace(" ", "")
-        if (sa.isEmpty() || sb.isEmpty()) return 0.0
-
-        // 最长公共子序列比率
-        val lcs = longestCommonSubsequence(sa, sb)
-        val maxLen = maxOf(sa.length, sb.length)
-        return if (maxLen == 0) 0.0 else lcs.toDouble() / maxLen
-    }
-
-    private fun longestCommonSubsequence(a: String, b: String): Int {
-        val m = a.length; val n = b.length
-        if (m == 0 || n == 0) return 0
-        val dp = Array(m + 1) { IntArray(n + 1) }
-        for (i in 1..m) {
-            for (j in 1..n) {
-                dp[i][j] = if (a[i - 1] == b[j - 1]) {
-                    dp[i - 1][j - 1] + 1
-                } else {
-                    maxOf(dp[i - 1][j], dp[i][j - 1])
-                }
-            }
-        }
-        return dp[m][n]
-    }
-
-    /**
-     * 艺人名精确匹配：检查候选歌手的名字是否与目标歌手明确匹配
-     */
-    private fun artistMatch(neteaseArtists: List<String>, candidateArtistStr: String): Double {
-        if (neteaseArtists.isEmpty()) return 1.0 // 无艺人信息时不影响评分
-
-        val ca = candidateArtistStr.split(Regex("[、,，/]"))
-            .map { it.trim().lowercase() }
-            .filter { it.isNotEmpty() && it.length >= 2 } // 长度至少2才有效
-
-        if (ca.isEmpty()) return 0.0
-
-        // 对网易云每个艺人，检查是否在候选艺人中存在明确匹配
-        val matchCount = neteaseArtists.map { na ->
-            val name = na.lowercase().trim()
-            if (name.isEmpty()) return@map false
-            ca.any { cand ->
-                // who contains whom — but must be at least 2 chars overlap
-                val minLen = minOf(name.length, cand.length)
-                if (minLen < 2) return@any false
-                cand.contains(name) || name.contains(cand)
-            }
-        }.count { it }
-
-        return matchCount.toDouble() / maxOf(neteaseArtists.size, 1)
-    }
-
-    private fun matchSong(info: SongInfo, candidates: List<KugouCandidate>): KugouCandidate? {
-        if (candidates.isEmpty()) return null
-
-        val neteaseArtists = info.artists
-            .map { normalizeArtistName(it.name) }
-            .filter { it.isNotEmpty() }
-
-        val scored = candidates.map { candidate ->
-            val charSim = charSimilarity(info.name, candidate.name)
-            val seqSim = sequentialSimilarity(info.name, candidate.name)
-            val nameSimilarity = maxOf(charSim, seqSim)
-            if (nameSimilarity < 0.45) {
-                return@map CandidateScore(candidate, 0.0, nameSimilarity, 0.0, 0.0)
-            }
-
-            val artistSimilarity = artistMatch(neteaseArtists, candidate.artists)
-            var durationRatio = 1.0
-            if (info.duration > 0 && candidate.duration > 0) {
-                durationRatio = minOf(info.duration, candidate.duration).toDouble() /
-                    maxOf(info.duration, candidate.duration)
-            }
-
-            val total = nameSimilarity * 50.0 + artistSimilarity * 35.0 + durationRatio * 15.0
-            CandidateScore(candidate, total, nameSimilarity, artistSimilarity, durationRatio)
-        }
-
-        val best = scored.maxByOrNull { it.total } ?: return null
-
-        val hasArtist = neteaseArtists.isNotEmpty()
-        val hasDuration = info.duration > 0 && best.candidate.duration > 0
-        val artistOk = !hasArtist || best.artistSimilarity >= 0.45
-        val artistStrong = !hasArtist || best.artistSimilarity >= 0.75
-        val durationOk = !hasDuration || best.durationRatio >= 0.78
-        val durationStrong = !hasDuration || best.durationRatio >= 0.9
-
-        val strongNameMatch = best.nameSimilarity >= 0.86 && (artistOk || durationOk)
-        val balancedMatch = best.nameSimilarity >= 0.68 && artistOk && durationOk
-        val metadataMatch = best.nameSimilarity >= 0.52 && artistStrong && durationStrong
-        if (!strongNameMatch && !balancedMatch && !metadataMatch) return null
-
-        val origName = normalize(info.name)
-        val bestName = normalize(best.candidate.name)
-        if (origName.isNotEmpty() && bestName.isNotEmpty()) {
-            val hasOverlap = origName.any { c -> bestName.contains(c) }
-                || bestName.any { c -> origName.contains(c) }
-            if (!hasOverlap) return null
-        }
-
-        return best.candidate
-    }
-
-    private fun normalizeArtistName(name: String): String {
-        return name.lowercase().trim()
     }
 
     // ==================== 工具函数 ====================

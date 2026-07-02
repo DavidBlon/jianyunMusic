@@ -1,4 +1,6 @@
 /**
+ * Legacy local fallback-source experiment kept outside the Android app path.
+ *
  * UnblockNeteaseMusic 音源替代模块
  *
  * 参考 https://github.com/nondanee/UnblockNeteaseMusic

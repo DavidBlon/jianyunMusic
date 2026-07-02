@@ -125,7 +125,7 @@ class MusicRepository(
                 name = song?.name ?: "",
                 artists = song?.artists.orEmpty(),
                 duration = song?.dt ?: 0,
-                quality = br.toBackupQuality()
+                quality = RepositoryPolicy.backupQualityFor(br)
             )
             val result = unblockManager.unblock(info)
             if (result != null) {
@@ -243,7 +243,7 @@ class MusicRepository(
                 name = song?.name ?: "",
                 artists = song?.artists.orEmpty(),
                 duration = song?.dt ?: 0,
-                quality = br.toBackupQuality()
+                quality = RepositoryPolicy.backupQualityFor(br)
             )
             val result = unblockManager.unblock(info) ?: return@withTimeoutOrNull null
             SongUrlResponse(
@@ -544,19 +544,14 @@ class MusicRepository(
     }
 
     private fun playbackUnavailableMessage(item: JsonObject?, playableUrl: String?, code: Int, fee: Int): String? {
-        if (!playableUrl.isNullOrBlank()) return null
-
-        val serverMessage = item?.string("message") ?: item?.string("msg")
-        val hasFreeTrial = item?.get("freeTrialInfo")?.let { !it.isJsonNull } == true
-        return when {
-            hasFreeTrial -> "这首歌当前只能试听，暂不支持播放完整版。"
-            fee == 1 -> "这首歌需要网易云 VIP，当前账号无法播放完整版。"
-            fee == 4 -> "这首歌需要单独购买后才能播放。"
-            code == 404 -> "这首歌暂无可用版权或播放地址。"
-            !serverMessage.isNullOrBlank() -> serverMessage
-            !session.isLoggedIn -> "当前未登录，部分会员或版权歌曲无法播放。"
-            else -> "这首歌当前不可播放，可能需要会员、购买或暂无版权。"
-        }
+        return RepositoryPolicy.playbackUnavailableMessage(
+            hasPlayableUrl = !playableUrl.isNullOrBlank(),
+            serverMessage = item?.string("message") ?: item?.string("msg"),
+            hasFreeTrial = item?.get("freeTrialInfo")?.let { !it.isJsonNull } == true,
+            code = code,
+            fee = fee,
+            loggedIn = session.isLoggedIn
+        )
     }
 
     private suspend fun completePlaylistSongs(
@@ -692,7 +687,7 @@ class MusicRepository(
                 .filter { it.isNotBlank() }
                 .joinToString("; ")
             if (cookie.isNotBlank()) {
-                qrSessionCookie = mergeCookiePairs(qrSessionCookie, cookie)
+                qrSessionCookie = RepositoryPolicy.mergeCookiePairs(qrSessionCookie, cookie)
             }
             JsonParser.parseString(responseText).asJsonObject to cookie
         }
@@ -727,23 +722,7 @@ class MusicRepository(
     }
 
     private fun qrPersistentCookie(finalCookie: String): String {
-        return mergeCookiePairs(qrRequestCookie(), finalCookie)
-    }
-
-    private fun mergeCookiePairs(existing: String, incoming: String): String {
-        val pairs = linkedMapOf<String, String>()
-        fun append(cookie: String) {
-            cookie.split(";")
-                .map { it.trim() }
-                .filter { it.contains("=") }
-                .forEach { pair ->
-                    val name = pair.substringBefore("=")
-                    pairs[name] = pair
-                }
-        }
-        append(existing)
-        append(incoming)
-        return pairs.values.joinToString("; ")
+        return RepositoryPolicy.mergeCookiePairs(qrRequestCookie(), finalCookie)
     }
 
     private fun qrDeviceId(): String {
@@ -824,5 +803,4 @@ class MusicRepository(
 
     private fun String.httpsUrl(): String = replaceFirst("http://", "https://")
 
-    private fun Int.toBackupQuality(): String = if (this <= 128000) "128k" else "320k"
 }

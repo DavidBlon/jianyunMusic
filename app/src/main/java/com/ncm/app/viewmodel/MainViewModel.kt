@@ -199,50 +199,30 @@ class MainViewModel : ViewModel() {
         }
         val updated = current.copy(
             playlists = updatedPlaylists,
-            likedCount = updatedPlaylists.firstOrNull { it.isLikedPlaylistName() }?.trackCount ?: current.likedCount
+            likedCount = updatedPlaylists.firstOrNull { MyLibraryReducer.isLikedPlaylistName(it.name) }?.trackCount ?: current.likedCount
         )
         _myState.value = updated
     }
 
     fun onLikedSongChanged(song: Song, liked: Boolean) {
-        val current = _myState.value
-        val likedPlaylist = current.playlists.firstOrNull { it.isLikedPlaylistName() } ?: return
-        val likedPlaylistId = likedPlaylist.id
-
-        val updatedPlaylists = current.playlists.map { playlist ->
-            if (playlist.id != likedPlaylistId) {
-                playlist
-            } else {
-                val nextCount = if (liked) playlist.trackCount + 1 else (playlist.trackCount - 1).coerceAtLeast(0)
-                playlist.copy(trackCount = nextCount)
-            }
-        }
-        val updatedMyState = current.copy(
-            playlists = updatedPlaylists,
-            likedCount = updatedPlaylists.firstOrNull { it.id == likedPlaylistId }?.trackCount ?: current.likedCount
+        val likedPlaylistId = _myState.value.playlists
+            .firstOrNull { MyLibraryReducer.isLikedPlaylistName(it.name) }
+            ?.id
+            ?: return
+        val (updatedMyState, updatedPlaylistState) = MyLibraryReducer.applyLikedSongChange(
+            current = _myState.value,
+            cachedLikedPlaylist = playlistCache[likedPlaylistId],
+            song = song,
+            liked = liked
         )
         _myState.value = updatedMyState
 
-        playlistCache[likedPlaylistId]?.let { cached ->
-            val nextSongs = if (liked) {
-                if (cached.songs.any { it.id == song.id }) cached.songs else listOf(song) + cached.songs
-            } else {
-                cached.songs.filterNot { it.id == song.id }
-            }
-            val nextTrackCount = maxOf(nextSongs.size, updatedMyState.likedCount)
-            val nextState = cached.copy(
-                playlist = cached.playlist?.copy(trackCount = nextTrackCount),
-                songs = nextSongs
-            )
+        updatedPlaylistState?.let { nextState ->
             playlistCache[likedPlaylistId] = nextState
             if (_playlistState.value.loadedPlaylistId == likedPlaylistId) {
                 _playlistState.value = nextState
             }
         }
-    }
-
-    private fun Playlist.isLikedPlaylistName(): Boolean {
-        return name.contains("喜欢") || name.contains("收藏")
     }
 
     fun search(keywords: String) {
@@ -288,10 +268,10 @@ class MainViewModel : ViewModel() {
             if (profile != null) {
                 repo.getUserPlaylists().onSuccess { playlists ->
                     val stats = repo.getUserStats().getOrDefault(UserStats())
-                    _myState.value = myStateFrom(profile, playlists, stats)
+                    _myState.value = MyLibraryReducer.stateFrom(profile, playlists, stats)
                 }.onFailure {
                     val stats = repo.getUserStats().getOrDefault(UserStats())
-                    _myState.value = myStateFrom(profile, _myState.value.playlists, stats)
+                    _myState.value = MyLibraryReducer.stateFrom(profile, _myState.value.playlists, stats)
                 }
             } else {
                 repo.refreshSession().onSuccess { status ->
@@ -299,10 +279,10 @@ class MainViewModel : ViewModel() {
                     if (p != null) {
                         repo.getUserPlaylists().onSuccess { playlists ->
                             val stats = repo.getUserStats().getOrDefault(UserStats())
-                            _myState.value = myStateFrom(p, playlists, stats)
+                            _myState.value = MyLibraryReducer.stateFrom(p, playlists, stats)
                         }.onFailure {
                             val stats = repo.getUserStats().getOrDefault(UserStats())
-                            _myState.value = myStateFrom(p, emptyList(), stats)
+                            _myState.value = MyLibraryReducer.stateFrom(p, emptyList(), stats)
                         }
                     } else {
                         _myState.value = MyUiState(isLoading = false)
@@ -312,18 +292,6 @@ class MainViewModel : ViewModel() {
                 }
             }
         }
-    }
-
-    private fun myStateFrom(profile: UserProfile, playlists: List<Playlist>, stats: UserStats): MyUiState {
-        val liked = playlists.firstOrNull { it.isLikedPlaylistName() }?.trackCount ?: 0
-        return MyUiState(
-            profile = profile,
-            playlists = playlists,
-            isLoading = false,
-            likedCount = liked,
-            listenCount = stats.listenCount,
-            followCount = stats.followCount
-        )
     }
 
     fun loadQuickList(type: String, force: Boolean = false) {
