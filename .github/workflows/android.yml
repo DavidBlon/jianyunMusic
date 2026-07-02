@@ -7,7 +7,7 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,10 +22,10 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Unit tests
-        run: ./gradlew testDebugUnitTest
+        run: .\gradlew.bat --no-daemon testDebugUnitTest
 
       - name: Android lint
-        run: ./gradlew lintDebug
+        run: .\gradlew.bat --no-daemon lintDebug
 
       - name: Assemble debug APK
-        run: ./gradlew assembleDebug
+        run: .\gradlew.bat --no-daemon assembleDebug
