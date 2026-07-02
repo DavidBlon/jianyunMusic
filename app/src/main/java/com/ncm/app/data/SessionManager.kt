@@ -33,6 +33,10 @@ class SessionManager(context: Context) {
         get() = prefs.getString("playback_quality", "STANDARD") ?: "STANDARD"
         set(value) = prefs.edit().putString("playback_quality", value).apply()
 
+    var qrDeviceId: String
+        get() = prefs.getString("qr_device_id", "") ?: ""
+        set(value) = prefs.edit().putString("qr_device_id", value).apply()
+
     val isLoggedIn: Boolean
         get() = cookie.contains("MUSIC_U")
 

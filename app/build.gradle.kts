@@ -80,6 +80,9 @@ dependencies {
     // Gson
     implementation("com.google.code.gson:gson:2.11.0")
 
+    // QR code generation
+    implementation("com.google.zxing:core:3.5.3")
+
     // Debug
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

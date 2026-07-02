@@ -14,20 +14,24 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.session.MediaSession
 import com.ncm.app.MainActivity
+import com.ncm.app.NeteaseApp
 import com.ncm.app.data.model.Song
 import com.ncm.app.util.sizedImageUrl
+import okhttp3.OkHttpClient
 import java.io.File
 
 object AppPlayer {
     private const val TAG = "AppPlayer"
     private const val MEDIA_EXTRA_SOURCE = "com.ncm.app.media.SOURCE"
+    private const val PLAYBACK_USER_AGENT =
+        "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.0.18.203152"
 
     private data class PlaybackSnapshot(
         val song: Song,
@@ -65,20 +69,32 @@ object AppPlayer {
     }
 
     private fun cacheDataSourceFactory(context: Context): CacheDataSource.Factory {
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setUserAgent("Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
-            .setDefaultRequestProperties(
-                mapOf(
-                    "Referer" to "https://music.163.com/",
-                    "Origin" to "https://music.163.com"
-                )
-            )
+        val httpDataSourceFactory = OkHttpDataSource.Factory(playbackHttpClient())
+            .setUserAgent(PLAYBACK_USER_AGENT)
 
         return CacheDataSource.Factory()
             .setCache(mediaCache(context))
             .setUpstreamDataSourceFactory(httpDataSourceFactory)
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+    }
+
+    private fun playbackHttpClient(): OkHttpClient {
+        return OkHttpClient.Builder()
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .addInterceptor { chain ->
+                val builder = chain.request().newBuilder()
+                    .header("User-Agent", PLAYBACK_USER_AGENT)
+                    .header("Referer", "https://music.163.com/")
+                    .header("Origin", "https://music.163.com")
+                    .header("Accept", "*/*")
+                val cookie = runCatching { NeteaseApp.instance.session.cookie }.getOrDefault("")
+                if (cookie.isNotBlank()) {
+                    builder.header("Cookie", cookie)
+                }
+                chain.proceed(builder.build())
+            }
+            .build()
     }
 
     private fun mediaCache(context: Context): SimpleCache {

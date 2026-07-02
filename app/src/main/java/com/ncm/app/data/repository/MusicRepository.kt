@@ -1,8 +1,14 @@
 package com.ncm.app.data.repository
 
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.util.Base64
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
+import com.google.gson.JsonParser
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.MultiFormatWriter
 import com.ncm.app.data.SessionManager
 import com.ncm.app.data.api.NeteaseApi
 import com.ncm.app.data.model.*
@@ -11,10 +17,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.OkHttpClient
+import okhttp3.FormBody
+import okhttp3.Request
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
-import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
+import kotlin.random.Random
 
 class MusicRepository(
     private val api: NeteaseApi,
@@ -22,14 +33,31 @@ class MusicRepository(
 ) {
 
     private companion object {
+        private const val QR_LOGIN_URL_PREFIX = "https://music.163.com/login?codekey="
         private const val NEW_SONG_CHART_FALLBACK_ID = 3779629L
         private const val NETWORK_MAX_ATTEMPTS = 3
         private const val NETWORK_RETRY_DELAY_MS = 450L
-        private const val OFFICIAL_SONG_URL_TIMEOUT_MS = 2_500L
+        private const val OFFICIAL_SONG_URL_TIMEOUT_MS = 6_000L
         private const val BACKUP_SONG_URL_TIMEOUT_MS = 6_500L
         private const val PLAYLIST_INITIAL_TRACK_LIMIT = 120
         private const val PLAYLIST_FULL_TRACK_LIMIT = 100000
+        private const val PLAYBACK_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.0.18.203152"
     }
+
+    private val qrHttp = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .build()
+    private val mediaProbeHttp = OkHttpClient.Builder()
+        .connectTimeout(2, TimeUnit.SECONDS)
+        .readTimeout(3, TimeUnit.SECONDS)
+        .writeTimeout(2, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+    private var qrSessionCookie: String = ""
 
     suspend fun getDiscoverHome(): Result<DiscoverHomeResponse> = safeCall {
         val banners = api.getBanners().array("banners").mapNotNull { it.objOrNull()?.toBanner() }
@@ -71,7 +99,7 @@ class MusicRepository(
         val playableUrl = rawUrl?.replaceFirst("http://", "https://")
         val code = item?.int("code") ?: 404
 
-        if (!playableUrl.isNullOrBlank()) {
+        if (!playableUrl.isNullOrBlank() && shouldUseOfficialMediaUrl(playableUrl)) {
             // 官方的 URL 可用，直接返回
             return@safeCall SongUrlResponse(
                 url = playableUrl,
@@ -136,7 +164,7 @@ class MusicRepository(
         val playableUrl = rawUrl?.replaceFirst("http://", "https://")
         val code = item?.int("code") ?: 404
 
-        if (!playableUrl.isNullOrBlank()) {
+        if (!playableUrl.isNullOrBlank() && shouldUseOfficialMediaUrl(playableUrl)) {
             return@safeCall SongUrlResponse(
                 url = playableUrl,
                 source = "netease",
@@ -171,6 +199,39 @@ class MusicRepository(
             loggedIn = session.isLoggedIn,
             error = "备用音源暂时不可用"
         )
+    }
+
+    private suspend fun shouldUseOfficialMediaUrl(url: String): Boolean {
+        return when (probeOfficialMediaUrl(url)) {
+            true -> true
+            false -> false
+            null -> true
+        }
+    }
+
+    private suspend fun probeOfficialMediaUrl(url: String): Boolean? = withContext(Dispatchers.IO) {
+        runCatching {
+            val request = Request.Builder()
+                .url(url)
+                .get()
+                .header("User-Agent", PLAYBACK_USER_AGENT)
+                .header("Referer", "https://music.163.com/")
+                .header("Origin", "https://music.163.com")
+                .header("Accept", "*/*")
+                .header("Range", "bytes=0-0")
+                .apply {
+                    val cookie = session.cookie
+                    if (cookie.isNotBlank()) header("Cookie", cookie)
+                }
+                .build()
+            mediaProbeHttp.newCall(request).execute().use { response ->
+                when (response.code) {
+                    200, 206 -> true
+                    401, 403, 404, 410 -> false
+                    else -> null
+                }
+            }
+        }.getOrNull()
     }
 
     private suspend fun getBackupSongUrlInternal(songId: Long, br: Int): SongUrlResponse? {
@@ -296,6 +357,54 @@ class MusicRepository(
 
     suspend fun getLoginStatus(): Result<LoginStatusResponse> = safeCall {
         loadAccountFromCookie()
+    }
+
+    suspend fun getQrLoginKey(): Result<String> = safeCall {
+        qrSessionCookie = ""
+        val body = postNeteaseJson(
+            url = "https://music.163.com/api/login/qrcode/unikey",
+            params = mapOf(
+                "type" to "3",
+                "timestamp" to System.currentTimeMillis().toString()
+            )
+        )
+        val key = body.obj("data").string("unikey") ?: body.string("unikey")
+        key?.takeIf { it.isNotBlank() } ?: throw IllegalStateException("无法获取二维码登录密钥")
+    }
+
+    suspend fun createQrLoginCode(key: String): Result<QrCreateResponse> = safeCall {
+        val qrUrl = "$QR_LOGIN_URL_PREFIX$key"
+        val qrImg = createQrDataUrl(qrUrl)
+        QrCreateResponse(
+            img = qrImg,
+            url = qrUrl
+        )
+    }
+
+    suspend fun checkQrLoginCode(key: String): Result<QrCheckResponse> = safeCall {
+        val (body, cookie) = postNeteaseJsonWithCookie(
+            url = "https://music.163.com/api/login/qrcode/client/login",
+            params = mapOf(
+                "key" to key,
+                "type" to "3",
+                "timestamp" to System.currentTimeMillis().toString()
+            )
+        )
+        val code = body.int("code")
+        if (code == 803) {
+            val persistentCookie = qrPersistentCookie(cookie)
+            if (persistentCookie.contains("MUSIC_U")) {
+                session.saveCookie(persistentCookie)
+            }
+            runCatching { loadAccountFromCookie() }
+        }
+        QrCheckResponse(
+            code = code,
+            message = body.string("message") ?: body.string("msg"),
+            nickname = body.string("nickname"),
+            avatar = body.string("avatarUrl"),
+            error = body.string("message") ?: body.string("msg")
+        )
     }
 
     suspend fun getQrKey(): Result<String> = safeCall {
@@ -549,6 +658,105 @@ class MusicRepository(
             id = long("id"),
             name = string("name").orEmpty()
         ).takeIf { it.name.isNotBlank() }
+    }
+
+    private suspend fun postNeteaseJson(
+        url: String,
+        params: Map<String, String>
+    ): JsonObject = postNeteaseJsonWithCookie(url, params).first
+
+    private suspend fun postNeteaseJsonWithCookie(
+        url: String,
+        params: Map<String, String>
+    ): Pair<JsonObject, String> = withContext(Dispatchers.IO) {
+        val form = FormBody.Builder().apply {
+            params.forEach { (key, value) -> add(key, value) }
+        }.build()
+        val request = Request.Builder()
+            .url(url)
+            .post(form)
+            .header("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 CloudMusic/9.0.0")
+            .header("Referer", "https://music.163.com/")
+            .header("Origin", "https://music.163.com")
+            .apply {
+                header("Cookie", qrRequestCookie())
+            }
+            .build()
+        qrHttp.newCall(request).execute().use { response ->
+            val responseText = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IOException(responseText.ifBlank { "网易云二维码接口 ${response.code}" })
+            }
+            val cookie = response.headers.values("Set-Cookie")
+                .map { it.substringBefore(";") }
+                .filter { it.isNotBlank() }
+                .joinToString("; ")
+            if (cookie.isNotBlank()) {
+                qrSessionCookie = mergeCookiePairs(qrSessionCookie, cookie)
+            }
+            JsonParser.parseString(responseText).asJsonObject to cookie
+        }
+    }
+
+    private fun createQrDataUrl(content: String): String {
+        val size = 640
+        val matrix = MultiFormatWriter().encode(content, BarcodeFormat.QR_CODE, size, size)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        for (y in 0 until size) {
+            for (x in 0 until size) {
+                bitmap.setPixel(x, y, if (matrix[x, y]) Color.BLACK else Color.WHITE)
+            }
+        }
+        val out = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+        bitmap.recycle()
+        return "data:image/png;base64,${Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)}"
+    }
+
+    private fun qrRequestCookie(): String {
+        return listOfNotNull(
+            qrSessionCookie.takeIf { it.isNotBlank() },
+            "sDeviceId=${qrDeviceId()}",
+            "deviceId=${qrDeviceId()}",
+            "os=pc",
+            "appver=3.1.17.204416",
+            "osver=Microsoft-Windows-10-Professional-build-19045-64bit",
+            "channel=netease",
+            "__remember_me=true"
+        ).joinToString("; ")
+    }
+
+    private fun qrPersistentCookie(finalCookie: String): String {
+        return mergeCookiePairs(qrRequestCookie(), finalCookie)
+    }
+
+    private fun mergeCookiePairs(existing: String, incoming: String): String {
+        val pairs = linkedMapOf<String, String>()
+        fun append(cookie: String) {
+            cookie.split(";")
+                .map { it.trim() }
+                .filter { it.contains("=") }
+                .forEach { pair ->
+                    val name = pair.substringBefore("=")
+                    pairs[name] = pair
+                }
+        }
+        append(existing)
+        append(incoming)
+        return pairs.values.joinToString("; ")
+    }
+
+    private fun qrDeviceId(): String {
+        val existing = session.qrDeviceId
+        if (existing.length == 52) return existing
+        val hex = "0123456789ABCDEF"
+        val generated = buildString {
+            repeat(52) {
+                append(hex[Random.nextInt(hex.length)])
+            }
+        }
+        session.qrDeviceId = generated
+        return generated
     }
 
     private fun JsonObject.obj(name: String): JsonObject = objOrNull(name) ?: JsonObject()

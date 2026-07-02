@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import com.ncm.app.NeteaseApp
 import com.ncm.app.data.AppCache
 import com.ncm.app.data.model.*
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -87,6 +89,7 @@ class MainViewModel : ViewModel() {
 
     private val _appState = MutableStateFlow(AppUiState(isLoggedIn = session.isLoggedIn))
     val appState: StateFlow<AppUiState> = _appState
+    private var qrPollingJob: Job? = null
 
     private val playlistCache = mutableMapOf<Long, PlaylistDetailUiState>()
     private val quickListCache = mutableMapOf<String, QuickListUiState>()
@@ -389,6 +392,71 @@ class MainViewModel : ViewModel() {
         }
     }
 
+    fun refreshQrLogin() {
+        qrPollingJob?.cancel()
+        viewModelScope.launch {
+            _loginState.value = LoginUiState(isLoggingIn = true)
+            repo.getQrLoginKey().onSuccess { key ->
+                repo.createQrLoginCode(key).onSuccess { qr ->
+                    if (qr.img.isNullOrBlank()) {
+                        _loginState.value = LoginUiState(error = qr.error ?: "二维码生成失败，请重试。")
+                        return@onSuccess
+                    }
+                    _loginState.value = LoginUiState(qrImg = qr.img, qrKey = key, qrCode = 801)
+                    startQrPolling(key)
+                }.onFailure { e ->
+                    _loginState.value = LoginUiState(error = e.message ?: "二维码生成失败，请重试。")
+                }
+            }.onFailure { e ->
+                _loginState.value = LoginUiState(error = e.message ?: "二维码生成失败，请重试。")
+            }
+        }
+    }
+
+    private fun startQrPolling(key: String) {
+        qrPollingJob?.cancel()
+        qrPollingJob = viewModelScope.launch {
+            while (true) {
+                delay(1800)
+                repo.checkQrLoginCode(key).onSuccess { resp ->
+                    when (resp.code) {
+                        800 -> {
+                            _loginState.value = _loginState.value.copy(
+                                qrCode = resp.code,
+                                error = "二维码已过期，请刷新后重试。"
+                            )
+                            return@launch
+                        }
+                        801, 802 -> {
+                            _loginState.value = _loginState.value.copy(
+                                qrCode = resp.code,
+                                error = resp.message
+                            )
+                        }
+                        803 -> {
+                            repo.refreshSession()
+                            _loginState.value = _loginState.value.copy(qrCode = resp.code, error = null)
+                            _appState.value = AppUiState(isLoggedIn = session.isLoggedIn)
+                            if (session.isLoggedIn) {
+                                loadMyData(force = true)
+                            }
+                            return@launch
+                        }
+                        else -> {
+                            _loginState.value = _loginState.value.copy(
+                                qrCode = resp.code,
+                                error = resp.message ?: resp.error
+                            )
+                        }
+                    }
+                }.onFailure { e ->
+                    _loginState.value = _loginState.value.copy(error = e.message ?: "二维码状态检查失败。")
+                    return@launch
+                }
+            }
+        }
+    }
+
     fun checkLoginStatus() {
         viewModelScope.launch {
             repo.refreshSession()
@@ -398,6 +466,7 @@ class MainViewModel : ViewModel() {
 
     fun logout() {
         viewModelScope.launch {
+            qrPollingJob?.cancel()
             _appState.value = AppUiState(isLoggedIn = false)
             _loginState.value = LoginUiState()
             _myState.value = MyUiState(isLoading = false)

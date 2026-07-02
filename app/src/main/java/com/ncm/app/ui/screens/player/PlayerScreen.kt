@@ -2,6 +2,8 @@ package com.ncm.app.ui.screens.player
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -9,6 +11,10 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -36,7 +42,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -334,7 +342,10 @@ private fun LyricsPanel(
 
     LaunchedEffect(activeIndex, lines.size) {
         if (lines.isNotEmpty()) {
-            listState.scrollToItem((activeIndex - 3).coerceAtLeast(0))
+            listState.animateScrollToItem(
+                index = (activeIndex - 3).coerceAtLeast(0),
+                scrollOffset = 0
+            )
         }
     }
 
@@ -357,34 +368,54 @@ private fun LyricsPanel(
         contentPadding = PaddingValues(vertical = 96.dp)
     ) {
         itemsIndexed(lines) { index, line ->
-            val active = index == activeIndex
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = if (active) 10.dp else 7.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = line.text,
-                    style = if (active) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyMedium,
-                    color = if (active) TextPrimary else TextSecondary,
-                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                    textAlign = TextAlign.Center,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis
-                )
-                if (!line.translation.isNullOrBlank()) {
-                    Text(
-                        text = line.translation,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (active) TextSecondary else TextTertiary,
-                        textAlign = TextAlign.Center,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
-                }
-            }
+            LyricRow(line = line, active = index == activeIndex)
+        }
+    }
+}
+
+@Composable
+private fun LyricRow(line: LyricLine, active: Boolean) {
+    val rowPadding by animateDpAsState(
+        targetValue = if (active) 8.dp else 6.dp,
+        animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+        label = "lyricRowPadding"
+    )
+    val mainColor by animateColorAsState(
+        targetValue = if (active) TextPrimary else TextSecondary,
+        animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+        label = "lyricMainColor"
+    )
+    val translationColor by animateColorAsState(
+        targetValue = if (active) TextSecondary else TextTertiary,
+        animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+        label = "lyricTranslationColor"
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = rowPadding),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = line.text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = mainColor,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (!line.translation.isNullOrBlank()) {
+            Text(
+                text = line.translation,
+                style = MaterialTheme.typography.bodySmall,
+                color = translationColor,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 4.dp)
+            )
         }
     }
 }
@@ -552,6 +583,13 @@ private fun ProgressBar(
     } else {
         currentPosition
     }
+    var trackWidthPx by remember { mutableFloatStateOf(1f) }
+    val enabled = duration > 0
+    val activeColor = if (enabled) Green500 else TextTertiary
+
+    fun progressFromX(x: Float): Float {
+        return (x / trackWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+    }
 
     LaunchedEffect(progress, isDragging) {
         if (!isDragging) {
@@ -560,30 +598,65 @@ private fun ProgressBar(
     }
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        Slider(
-            value = visibleProgress,
-            onValueChange = {
-                isDragging = true
-                draggingProgress = it.coerceIn(0f, 1f)
-            },
-            onValueChangeFinished = {
-                isDragging = false
-                onSeek(draggingProgress)
-            },
-            valueRange = 0f..1f,
-            enabled = duration > 0,
-            colors = SliderDefaults.colors(
-                thumbColor = Green500,
-                activeTrackColor = Green500,
-                inactiveTrackColor = DarkSurface,
-                disabledThumbColor = TextTertiary,
-                disabledActiveTrackColor = DarkSurface,
-                disabledInactiveTrackColor = DarkSurface
-            ),
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(28.dp)
-        )
+                .height(20.dp)
+                .onSizeChanged { trackWidthPx = it.width.toFloat().coerceAtLeast(1f) }
+                .pointerInput(enabled, trackWidthPx) {
+                    if (enabled) {
+                        detectTapGestures { offset ->
+                            val nextProgress = progressFromX(offset.x)
+                            draggingProgress = nextProgress
+                            onSeek(nextProgress)
+                        }
+                    }
+                }
+                .pointerInput(enabled, trackWidthPx) {
+                    if (enabled) {
+                        detectDragGestures(
+                            onDragStart = { offset ->
+                                isDragging = true
+                                draggingProgress = progressFromX(offset.x)
+                            },
+                            onDragEnd = {
+                                isDragging = false
+                                onSeek(draggingProgress)
+                            },
+                            onDragCancel = {
+                                isDragging = false
+                            }
+                        ) { change, _ ->
+                            draggingProgress = progressFromX(change.position.x)
+                        }
+                    }
+                }
+        ) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .fillMaxWidth()
+                    .height(2.dp)
+                    .clip(CircleShape)
+                    .background(DarkSurface)
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .fillMaxWidth(visibleProgress)
+                    .height(2.dp)
+                    .clip(CircleShape)
+                    .background(activeColor)
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .offset(x = (maxWidth - 10.dp) * visibleProgress)
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(activeColor)
+            )
+        }
 
         Row(
             modifier = Modifier

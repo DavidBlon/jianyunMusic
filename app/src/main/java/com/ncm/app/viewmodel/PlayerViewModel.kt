@@ -55,7 +55,7 @@ class PlayerViewModel : ViewModel() {
         private const val PLAY_REQUEST_DEBOUNCE_MS = 180L
         private const val QUEUE_PREFETCH_START_DELAY_MS = 700L
         private const val QUEUE_PREFETCH_REQUEST_DELAY_MS = 300L
-        private const val BUFFERING_FALLBACK_TIMEOUT_MS = 5_000L
+        private const val BUFFERING_FALLBACK_TIMEOUT_MS = 18_000L
         private const val PROGRESS_UPDATE_INTERVAL_MS = 500L
         private const val MIN_PROGRESS_UPDATE_MS = 400L
     }
