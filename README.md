@@ -4,7 +4,7 @@
 
 ## 当前重点
 
-- Android 端主路径已经改为 Kotlin 网络层直接访问所需接口，不依赖本地 Node 代理才能运行。
+- Android 端主路径通过 Kotlin 网络层直接访问所需接口，不需要 Node.js 或本地代理服务。
 - 播放优先使用网易云官方音源，官方地址不可读或加载失败时再尝试备用音源。
 - 登录支持网页登录 Cookie 同步和二维码登录，播放请求会携带 Cookie、Referer、Origin 和网易云桌面 UA。
 - 已加入 JVM 单元测试、Android Lint 配置和 GitHub Actions CI，避免只靠人工回归。
@@ -23,19 +23,6 @@
 - 登录：支持网页登录 Cookie 同步和二维码登录。
 - 喜欢歌曲：在播放器内喜欢/取消喜欢，并同步真实账号状态。
 - 后台播放：Media3 ExoPlayer、前台播放服务和系统通知栏控制。
-
-### Legacy Node 工具 (`tools/legacy-node/`)
-
-`tools/legacy-node/server.js` 和 `tools/legacy-node/unblock.js` 是早期本地 API 代理和备用音源实验工具。它们不属于当前 Android 主运行路径，仅保留给手动对照、抓接口或回归旧实验使用。
-
-如需启动旧工具：
-
-```powershell
-npm install
-npm start
-```
-
-默认监听端口为 `3000`。
 
 ## 技术栈
 
@@ -112,7 +99,6 @@ app/
       theme/        主题
     viewmodel/      页面与播放状态
   src/test/          JVM 单元测试
-tools/legacy-node/  早期本地代理和备用音源实验工具
 design/             设计素材
 ```
 

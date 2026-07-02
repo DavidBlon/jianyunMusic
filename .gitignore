@@ -9,12 +9,9 @@ local.properties
 # Kotlin
 .kotlin/
 
-# Node
-node_modules/
-package-lock.json
-
 # IDE
 .agents/
+.claude/
 .codex/
 
 # OS
