@@ -99,7 +99,6 @@ app/
       theme/        主题
     viewmodel/      页面与播放状态
   src/test/          JVM 单元测试
-design/             设计素材
 ```
 
 ## 说明
