@@ -65,14 +65,20 @@ class MusicRepository(
         val dailySongs = playlists.firstOrNull()?.let { playlist ->
             getPlaylistTracks(playlist.id).getOrNull()?.tracks?.take(12)
         }.orEmpty()
-        val newSongChartId = api.getToplistDetail()
+        val newSongChart = api.getToplistDetail()
             .array("list")
             .mapNotNull { it.objOrNull() }
             .firstOrNull { chart -> chart.string("name").orEmpty().contains("新歌") }
-            ?.long("id")
-            ?.takeIf { it > 0 }
-            ?: NEW_SONG_CHART_FALLBACK_ID
-        val newSongs = getPlaylistTracks(newSongChartId).getOrNull()?.tracks?.take(5).orEmpty()
+        // 榜单接口已带 tracks（含封面），直接用，避免再发一次可能失败的歌单请求导致广告位封面为空
+        val newSongs = newSongChart
+            ?.array("tracks")
+            ?.mapNotNull { it.objOrNull()?.toSong() }
+            ?.take(5)
+            .orEmpty()
+            .ifEmpty {
+                val chartId = newSongChart?.long("id")?.takeIf { it > 0 } ?: NEW_SONG_CHART_FALLBACK_ID
+                getPlaylistTracks(chartId).getOrNull()?.tracks?.take(5).orEmpty()
+            }
         DiscoverHomeResponse(banners = banners, playlists = playlists, dailySongs = dailySongs, newSongs = newSongs)
     }
 

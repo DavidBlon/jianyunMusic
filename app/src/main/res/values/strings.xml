@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">简云音乐</string>
+    <string name="notification_channel_name">音乐播放</string>
     <string name="tab_discover">发现</string>
     <string name="tab_playlist">歌单</string>
     <string name="tab_search">搜索</string>

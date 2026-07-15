@@ -110,6 +110,9 @@ fun MainApp() {
         !miniPlayerBlocked
 
     LaunchedEffect(currentRoute) {
+        if (previousRoute == Routes.SEARCH && currentRoute != Routes.SEARCH) {
+            mainViewModel.clearSearch()
+        }
         if (isLeavingPlayer) {
             miniPlayerBlocked = true
             delay(250)

@@ -6,8 +6,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.automirrored.outlined.QueueMusic
@@ -17,11 +15,6 @@ import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.*
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -29,8 +22,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -44,7 +35,6 @@ import com.ncm.app.data.model.UserProfile
 import com.ncm.app.ui.theme.*
 import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
-import kotlinx.coroutines.delay
 
 @Composable
 fun DiscoverScreen(
@@ -69,7 +59,6 @@ fun DiscoverScreen(
     ) {
         item { Header(profile = profile) }
         item { SearchBar(onClick = onSearchClick) }
-        item { AdCarousel(state.newSongs) }
         item { QuickActions(onQuickClick) }
         item { RecommendedPlaylists(state.playlists, onPlaylistClick) }
         item { RecommendedSongs(state.dailySongs, onSongClick) }
@@ -120,191 +109,6 @@ private fun SearchBar(onClick: () -> Unit) {
         Icon(androidx.compose.material.icons.Icons.Outlined.Search, null, tint = TextTertiary, modifier = Modifier.size(18.dp))
         Spacer(modifier = Modifier.width(8.dp))
         Text("搜索歌曲、歌手、专辑", style = MaterialTheme.typography.bodyMedium, color = TextTertiary)
-    }
-}
-
-@Composable
-private fun AdCarousel(newSongs: List<Song>) {
-    val pageCount = 1_000
-    val startPage = pageCount / 2
-    val pagerState = rememberPagerState(initialPage = startPage, pageCount = { pageCount })
-    val sweepTransition = rememberInfiniteTransition(label = "ad_sweep")
-    val sweepOffset by sweepTransition.animateFloat(
-        initialValue = -220f,
-        targetValue = 420f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 2600),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "ad_sweep_offset"
-    )
-
-    LaunchedEffect(pagerState) {
-        while (true) {
-            delay(3_000)
-            pagerState.animateScrollToPage(pagerState.currentPage + 1)
-        }
-    }
-
-    HorizontalPager(
-        state = pagerState,
-        userScrollEnabled = false,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 20.dp, end = 20.dp, top = 16.dp)
-            .height(128.dp)
-            .clip(RoundedCornerShape(12.dp))
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.linearGradient(
-                        listOf(
-                            Color(0xFF585B61),
-                            Color(0xFF3E4248),
-                            Color(0xFF2F3237)
-                        )
-                    )
-                )
-        ) {
-            Box(
-                modifier = Modifier
-                    .offset(x = sweepOffset.dp)
-                    .width(62.dp)
-                    .fillMaxHeight()
-                    .rotate(14f)
-                    .background(
-                        Brush.horizontalGradient(
-                            listOf(
-                                Color.Transparent,
-                                Color.White.copy(alpha = 0.12f),
-                                Color.Transparent
-                            )
-                        )
-                    )
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "AD SPACE",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFFD8DADF),
-                        modifier = Modifier
-                            .background(Color.White.copy(alpha = 0.10f), RoundedCornerShape(7.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
-                    Text(
-                        text = "新歌热度正在上升",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = Color(0xFFF1F2F4),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 14.dp)
-                    )
-                    Text(
-                        text = "广告招标 · 抢占本周新声入口",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFD7DADE),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
-                    Text(
-                        text = "MUSIC · BRAND · LOCAL",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFFC7CAD0),
-                        modifier = Modifier.padding(top = 10.dp)
-                    )
-                }
-
-                NewSongCoverStack(newSongs = newSongs)
-            }
-        }
-    }
-}
-
-@Composable
-private fun NewSongCoverStack(newSongs: List<Song>) {
-    Box(
-        modifier = Modifier
-            .width(132.dp)
-            .fillMaxHeight()
-    ) {
-        val covers = newSongs.take(5)
-        if (covers.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .size(84.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(Color.White.copy(alpha = 0.12f))
-            )
-            return@Box
-        }
-
-        covers.forEachIndexed { index, song ->
-            val size = when (index) {
-                0 -> 78.dp
-                1 -> 56.dp
-                2 -> 50.dp
-                else -> 42.dp
-            }
-            val x = when (index) {
-                0 -> 44.dp
-                1 -> 6.dp
-                2 -> 24.dp
-                3 -> 84.dp
-                else -> 74.dp
-            }
-            val y = when (index) {
-                0 -> 23.dp
-                1 -> 5.dp
-                2 -> 72.dp
-                3 -> 6.dp
-                else -> 82.dp
-            }
-            val rotation = when (index) {
-                0 -> 4f
-                1 -> -8f
-                2 -> 7f
-                3 -> 9f
-                else -> -6f
-            }
-            Box(
-                modifier = Modifier
-                    .offset(x = x, y = y)
-                    .size(size)
-                    .graphicsLayer {
-                        rotationZ = rotation
-                        shadowElevation = 10f
-                    }
-                    .clip(RoundedCornerShape(if (index == 0) 14.dp else 11.dp))
-                    .background(Color.White.copy(alpha = 0.12f))
-            ) {
-                val albumUrl = song.album?.picUrl
-                if (!albumUrl.isNullOrBlank()) {
-                    AsyncImage(sizedImageUrl(albumUrl, 180), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                }
-                if (index == 0) {
-                    Text(
-                        text = "TOP 1",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.White,
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(6.dp)
-                            .background(Color.Black.copy(alpha = 0.42f), RoundedCornerShape(6.dp))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
-                }
-            }
-        }
     }
 }
 

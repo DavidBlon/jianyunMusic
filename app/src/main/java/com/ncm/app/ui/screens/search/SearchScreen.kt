@@ -30,7 +30,15 @@ fun SearchScreen(
     viewModel: MainViewModel = viewModel()
 ) {
     val state by viewModel.searchState.collectAsState()
-    var query by remember { mutableStateOf(state.query) }
+    var query by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        viewModel.clearSearch()
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { viewModel.clearSearch() }
+    }
 
     LaunchedEffect(query) {
         val trimmed = query.trim()
