@@ -133,6 +133,11 @@ object AppPlayer {
 
     fun isPlaying(): Boolean = exoPlayer?.isPlaying == true
 
+    fun hasResumablePlayback(): Boolean {
+        val player = exoPlayer ?: return false
+        return player.mediaItemCount > 0 && player.playbackState != androidx.media3.common.Player.STATE_IDLE
+    }
+
     fun currentSong(): Song? = currentSong
 
     fun currentSource(): String = currentSource
