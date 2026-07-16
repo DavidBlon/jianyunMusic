@@ -22,24 +22,28 @@ object GitHubUpdateChecker {
     suspend fun check(currentVersion: String): UpdateInfo? = withContext(Dispatchers.IO) {
         runCatching {
             val request = Request.Builder()
-                .url("https://gitee.com/api/v5/repos/$REPOSITORY/tags?per_page=20")
+                .url("https://gitee.com/api/v5/repos/$REPOSITORY/releases/latest")
                 .header("Accept", "application/json")
                 .build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@use null
                 val body = response.body ?: return@use null
-                val tags = JsonParser.parseString(body.string()).asJsonArray
-                tags.asSequence()
-                    .mapNotNull { item -> item.asJsonObject.get("name")?.asString }
-                    .map { it to normalizeVersion(it) }
-                    .filter { (_, version) -> isNewer(version, currentVersion) }
-                    .maxWithOrNull { left, right -> compareVersions(left.second, right.second) }
-                    ?.let { (tag, version) ->
-                        UpdateInfo(
-                            versionName = version,
-                            downloadUrl = "https://gitee.com/$REPOSITORY/raw/$tag/release/JianYunMusic-v$version.apk"
-                        )
+                val release = JsonParser.parseString(body.string()).asJsonObject
+                val version = release.get("tag_name")?.asString?.let(::normalizeVersion) ?: return@use null
+                if (!isNewer(version, currentVersion)) return@use null
+
+                val releaseId = release.get("id")?.asLong ?: return@use null
+                val attachment = release.getAsJsonArray("attach_files")
+                    ?.firstOrNull { item ->
+                        item.asJsonObject.get("name")?.asString?.endsWith(".apk", ignoreCase = true) == true
                     }
+                    ?.asJsonObject
+                    ?: return@use null
+                val attachmentId = attachment.get("id")?.asLong ?: return@use null
+                UpdateInfo(
+                    versionName = version,
+                    downloadUrl = "https://gitee.com/api/v5/repos/$REPOSITORY/releases/$releaseId/attach_files/$attachmentId/download"
+                )
             }
         }.getOrNull()
     }
