@@ -32,17 +32,16 @@ object GitHubUpdateChecker {
                 val version = release.get("tag_name")?.asString?.let(::normalizeVersion) ?: return@use null
                 if (!isNewer(version, currentVersion)) return@use null
 
-                val releaseId = release.get("id")?.asLong ?: return@use null
-                val attachment = release.getAsJsonArray("attach_files")
+                val attachment = release.getAsJsonArray("assets")
                     ?.firstOrNull { item ->
-                        item.asJsonObject.get("name")?.asString?.endsWith(".apk", ignoreCase = true) == true
+                        item.asJsonObject.get("name")?.asString?.endsWith(".apk", ignoreCase = true) == true &&
+                            item.asJsonObject.get("browser_download_url") != null
                     }
                     ?.asJsonObject
                     ?: return@use null
-                val attachmentId = attachment.get("id")?.asLong ?: return@use null
                 UpdateInfo(
                     versionName = version,
-                    downloadUrl = "https://gitee.com/api/v5/repos/$REPOSITORY/releases/$releaseId/attach_files/$attachmentId/download"
+                    downloadUrl = attachment.get("browser_download_url").asString
                 )
             }
         }.getOrNull()
