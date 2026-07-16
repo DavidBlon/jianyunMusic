@@ -1,6 +1,11 @@
 package com.ncm.app
 
 import android.Manifest
+import android.app.DownloadManager
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -29,6 +34,7 @@ import androidx.compose.material.icons.outlined.SkipNext
 import androidx.compose.material.icons.outlined.SkipPrevious
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -43,6 +49,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
@@ -50,6 +57,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.core.content.ContextCompat
+import com.ncm.app.data.update.ApkUpdateInstaller
+import com.ncm.app.data.update.GitHubUpdateChecker
+import com.ncm.app.data.update.UpdateInfo
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import coil.compose.AsyncImage
@@ -192,6 +203,72 @@ fun MainApp() {
         }
 
         OpeningSplash()
+        AppUpdatePrompt()
+    }
+}
+
+@Composable
+private fun AppUpdatePrompt() {
+    val context = LocalContext.current
+    val installer = remember(context) { ApkUpdateInstaller(context) }
+    var update by remember { mutableStateOf<UpdateInfo?>(null) }
+
+    LaunchedEffect(Unit) {
+        update = GitHubUpdateChecker.check(BuildConfig.VERSION_NAME)
+    }
+
+    DisposableEffect(installer) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.action != DownloadManager.ACTION_DOWNLOAD_COMPLETE) return
+                installer.installIfCurrentDownload(
+                    intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+                )
+            }
+        }
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        onDispose { context.unregisterReceiver(receiver) }
+    }
+
+    update?.let { info ->
+        AlertDialog(
+            onDismissRequest = { update = null },
+            containerColor = DarkSurface,
+            title = { Text("发现新版本 ${info.versionName}", color = TextPrimary) },
+            text = {
+                Text(
+                    "新版本已发布。下载完成后将自动打开系统安装页面。",
+                    color = TextSecondary
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (installer.canInstallPackages()) {
+                            installer.download(info)
+                            update = null
+                        } else {
+                            installer.requestInstallPermission()
+                        }
+                    }
+                ) {
+                    Text(
+                        if (installer.canInstallPackages()) "立即更新" else "授权后更新",
+                        color = Green500
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { update = null }) {
+                    Text("暂不", color = TextSecondary)
+                }
+            }
+        )
     }
 }
 
