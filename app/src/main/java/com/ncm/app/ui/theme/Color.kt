@@ -1,8 +1,13 @@
 package com.ncm.app.ui.theme
 
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
-val Green500 = Color(0xFF58B86A)
+val DefaultGreen500 = Color(0xFF58B86A)
+val LocalAccentColor = staticCompositionLocalOf { DefaultGreen500 }
+val Green500: Color
+    @Composable get() = LocalAccentColor.current
 val Green600 = Color(0xFF4AA85C)
 val Green700 = Color(0xFF3D8B4F)
 val Green800 = Color(0xFF2D6B3C)

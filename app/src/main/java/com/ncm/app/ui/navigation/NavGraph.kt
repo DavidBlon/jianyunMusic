@@ -122,6 +122,7 @@ fun NavGraph(
                     }
                     navController.navigate(Routes.player(id))
                 },
+                onPlayNext = { song -> playerViewModel.enqueueNext(song) },
                 viewModel = mainViewModel
             )
         }

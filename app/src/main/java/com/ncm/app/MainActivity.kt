@@ -73,7 +73,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         requestNotificationPermissionIfNeeded()
         setContent {
-            NeteaseMusicTheme {
+            val accentTheme by NeteaseApp.instance.accentThemeSettings.theme.collectAsState()
+            NeteaseMusicTheme(accent = accentTheme.color) {
                 MainApp()
             }
         }

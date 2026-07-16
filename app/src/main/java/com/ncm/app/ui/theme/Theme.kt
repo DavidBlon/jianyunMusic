@@ -5,13 +5,15 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
-private val DarkColorScheme = darkColorScheme(
-    primary = Green500,
+private fun darkColorSchemeFor(accent: Color) = darkColorScheme(
+    primary = accent,
     onPrimary = TextPrimary,
     primaryContainer = Green700,
     onPrimaryContainer = TextPrimary,
@@ -27,14 +29,15 @@ private val DarkColorScheme = darkColorScheme(
     outlineVariant = DarkSurface2,
     error = RedAccent,
     onError = TextPrimary,
-    surfaceTint = Green500
+    surfaceTint = accent
 )
 
 @Composable
 fun NeteaseMusicTheme(
+    accent: Color = DefaultGreen500,
     content: @Composable () -> Unit
 ) {
-    val colorScheme = DarkColorScheme
+    val colorScheme = darkColorSchemeFor(accent)
     val view = LocalView.current
 
     if (!view.isInEditMode) {
@@ -45,9 +48,7 @@ fun NeteaseMusicTheme(
         }
     }
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = AppTypography,
-        content = content
-    )
+    CompositionLocalProvider(LocalAccentColor provides accent) {
+        MaterialTheme(colorScheme = colorScheme, typography = AppTypography, content = content)
+    }
 }

@@ -5,6 +5,8 @@ import com.ncm.app.data.AppCache
 import com.ncm.app.data.SessionManager
 import com.ncm.app.data.api.NeteaseApi
 import com.ncm.app.data.repository.MusicRepository
+import com.ncm.app.ui.theme.AccentThemeSettings
+import com.ncm.app.ui.theme.PlayerAppearanceSettings
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -24,12 +26,18 @@ class NeteaseApp : Application() {
 
     lateinit var cache: AppCache
         private set
+    lateinit var accentThemeSettings: AccentThemeSettings
+        private set
+    lateinit var playerAppearanceSettings: PlayerAppearanceSettings
+        private set
 
     override fun onCreate() {
         super.onCreate()
         instance = this
         session = SessionManager(this)
         cache = AppCache(this)
+        accentThemeSettings = AccentThemeSettings(this)
+        playerAppearanceSettings = PlayerAppearanceSettings(this)
         cache.removePrefix(AppCache.KEY_PLAYLIST_PREFIX)
         cache.removePrefix(AppCache.KEY_QUICK_PREFIX)
         cache.remove(AppCache.KEY_DISCOVER)

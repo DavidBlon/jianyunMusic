@@ -15,6 +15,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -25,10 +28,12 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.ncm.app.data.model.Playlist
 import com.ncm.app.data.model.UserProfile
+import com.ncm.app.NeteaseApp
 import com.ncm.app.ui.theme.*
 import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MyScreen(
     onPlaylistClick: (Long) -> Unit,
@@ -37,6 +42,8 @@ fun MyScreen(
     viewModel: MainViewModel = viewModel()
 ) {
     val state by viewModel.myState.collectAsState()
+    val accentTheme by NeteaseApp.instance.accentThemeSettings.theme.collectAsState()
+    var showThemePicker by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         viewModel.loadMyData()
@@ -50,6 +57,10 @@ fun MyScreen(
     ) {
         item { ProfileHeader(profile = state.profile) }
         item { Spacer(modifier = Modifier.height(8.dp)) }
+        item {
+            ThemeColorRow(themeName = accentTheme.label, onClick = { showThemePicker = true })
+            Spacer(modifier = Modifier.height(8.dp))
+        }
 
         when {
             state.isLoading -> {
@@ -84,6 +95,41 @@ fun MyScreen(
                 Text("退出登录", color = TextSecondary)
             }
         }
+    }
+
+    if (showThemePicker) {
+        ModalBottomSheet(onDismissRequest = { showThemePicker = false }, containerColor = DarkSurface) {
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
+                Text("主题色", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+                AccentTheme.entries.forEach { theme ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            NeteaseApp.instance.accentThemeSettings.setTheme(theme)
+                            showThemePicker = false
+                        }.padding(vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(Modifier.size(20.dp).clip(CircleShape).background(theme.color))
+                        Spacer(Modifier.width(12.dp))
+                        Text(theme.label, modifier = Modifier.weight(1f), color = TextPrimary)
+                        if (theme == accentTheme) Text("当前", color = Green500, style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThemeColorRow(themeName: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("主题色", style = MaterialTheme.typography.titleMedium, color = TextPrimary, modifier = Modifier.weight(1f))
+        Text(themeName, style = MaterialTheme.typography.bodySmall, color = TextTertiary)
+        Spacer(Modifier.width(6.dp))
+        Icon(androidx.compose.material.icons.Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = TextTertiary, modifier = Modifier.size(18.dp))
     }
 }
 

@@ -32,6 +32,9 @@ data class PlayerUiState(
     val quality: PlaybackQuality = PlaybackQuality.STANDARD,
     val isLiked: Boolean = false,
     val isLikeUpdating: Boolean = false,
+    val queue: List<Song> = emptyList(),
+    val history: List<Song> = emptyList(),
+    val sleepRemainingSeconds: Int? = null,
     val error: String? = null
 )
 
@@ -58,6 +61,7 @@ class PlayerViewModel : ViewModel() {
         private const val BUFFERING_FALLBACK_TIMEOUT_MS = 18_000L
         private const val PROGRESS_UPDATE_INTERVAL_MS = 500L
         private const val MIN_PROGRESS_UPDATE_MS = 400L
+        private const val HISTORY_LIMIT = 100
     }
 
     private data class UrlCacheKey(
@@ -84,6 +88,7 @@ class PlayerViewModel : ViewModel() {
     private var progressJob: Job? = null
     private var queuePrefetchJob: Job? = null
     private var bufferingFallbackJob: Job? = null
+    private var sleepTimerJob: Job? = null
     private var queuePrefetchAnchorSongId: Long? = null
     private var transientBackupSongId: Long? = null
     private val preparedQueueItems = mutableMapOf<Long, PreparedQueueItem>()
@@ -168,6 +173,7 @@ class PlayerViewModel : ViewModel() {
                 error = null
             )
             refreshLiked(songId)
+            rememberInHistory(prepared.song)
             loadLyric(songId)
             appendPreparedQueue(songId)
             prefetchQueueAfter(songId)
@@ -191,6 +197,7 @@ class PlayerViewModel : ViewModel() {
     init {
         AppPlayer.mediaSession(app)
         player.addListener(playerListener)
+        _state.value = _state.value.copy(history = loadHistory())
         restoreFromActivePlayer()
     }
 
@@ -326,6 +333,74 @@ class PlayerViewModel : ViewModel() {
     fun setQueue(songs: List<Song>, startIndex: Int = 0) {
         playQueue = songs
         currentIndex = startIndex.coerceIn(0, (songs.size - 1).coerceAtLeast(0))
+        _state.value = _state.value.copy(queue = playQueue)
+    }
+
+    fun playFromQueue(songId: Long) {
+        val index = playQueue.indexOfFirst { it.id == songId }
+        if (index < 0) return
+        currentIndex = index
+        playFromQueue(index)
+    }
+
+    fun playFromHistory(song: Song) {
+        val history = _state.value.history
+        setQueue(history, history.indexOfFirst { it.id == song.id }.coerceAtLeast(0))
+        playFromQueue(song.id)
+    }
+
+    fun removeFromQueue(songId: Long) {
+        val index = playQueue.indexOfFirst { it.id == songId }
+        if (index < 0 || _state.value.currentSong?.id == songId) return
+        playQueue = playQueue.filterNot { it.id == songId }
+        if (index < currentIndex) currentIndex--
+        currentIndex = currentIndex.coerceIn(0, (playQueue.size - 1).coerceAtLeast(0))
+        preparedQueueItems.remove(songId)
+        _state.value = _state.value.copy(queue = playQueue)
+    }
+
+    fun clearQueue() {
+        val current = _state.value.currentSong
+        playQueue = current?.let(::listOf).orEmpty()
+        currentIndex = 0
+        preparedQueueItems.keys.retainAll(playQueue.map { it.id }.toSet())
+        _state.value = _state.value.copy(queue = playQueue)
+    }
+
+    fun enqueueNext(song: Song) {
+        val current = _state.value.currentSong
+        if (current == null) {
+            setQueue(listOf(song))
+            playFromQueue(song.id)
+            return
+        }
+        val withoutSong = playQueue.filterNot { it.id == song.id }
+        val currentPosition = withoutSong.indexOfFirst { it.id == current.id }
+        playQueue = if (currentPosition >= 0) {
+            withoutSong.toMutableList().apply { add(currentPosition + 1, song) }
+        } else {
+            listOf(current, song) + withoutSong
+        }
+        currentIndex = playQueue.indexOfFirst { it.id == current.id }.coerceAtLeast(0)
+        _state.value = _state.value.copy(queue = playQueue)
+    }
+
+    fun setSleepTimer(minutes: Int) {
+        sleepTimerJob?.cancel()
+        if (minutes <= 0) {
+            _state.value = _state.value.copy(sleepRemainingSeconds = null)
+            return
+        }
+        sleepTimerJob = viewModelScope.launch {
+            var remaining = minutes * 60
+            while (remaining > 0) {
+                _state.value = _state.value.copy(sleepRemainingSeconds = remaining)
+                delay(1_000)
+                remaining--
+            }
+            player.pause()
+            _state.value = _state.value.copy(sleepRemainingSeconds = null, isPlaying = false)
+        }
     }
 
     fun togglePlayMode() {
@@ -548,6 +623,7 @@ class PlayerViewModel : ViewModel() {
             .takeIf { it >= 0 }
             ?.let { currentIndex = it }
         if (player.isPlaying) startProgressUpdates()
+        rememberInHistory(song)
     }
 
     private fun hasActiveMedia(): Boolean {
@@ -613,6 +689,7 @@ class PlayerViewModel : ViewModel() {
             isLikeUpdating = false
         )
         refreshLiked(prepared.song.id)
+        rememberInHistory(prepared.song)
         startPlayback(
             prepared.song,
             prepared.url,
@@ -872,11 +949,24 @@ class PlayerViewModel : ViewModel() {
         }
     }
 
+    private fun historyCacheKey(): String = "play_history:${session.userId}"
+
+    private fun loadHistory(): List<Song> = app.cache.get<List<Song>>(historyCacheKey()).orEmpty()
+
+    private fun rememberInHistory(song: Song) {
+        val history = (_state.value.history.filterNot { it.id == song.id } + song)
+            .takeLast(HISTORY_LIMIT)
+            .asReversed()
+        app.cache.put(historyCacheKey(), history)
+        _state.value = _state.value.copy(history = history)
+    }
+
     override fun onCleared() {
         playRequestJob?.cancel()
         progressJob?.cancel()
         queuePrefetchJob?.cancel()
         bufferingFallbackJob?.cancel()
+        sleepTimerJob?.cancel()
         player.removeListener(playerListener)
         if (_state.value.songUrl.isNullOrBlank()) {
             AppPlayer.stopPlaybackService(app)

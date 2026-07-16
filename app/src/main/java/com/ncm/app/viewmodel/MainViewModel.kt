@@ -33,7 +33,9 @@ data class PlaylistDetailUiState(
 data class SearchUiState(
     val query: String = "",
     val results: List<Song> = emptyList(),
-    val isSearching: Boolean = false
+    val isSearching: Boolean = false,
+    val isCommitted: Boolean = false,
+    val history: List<String> = emptyList()
 )
 
 data class MyUiState(
@@ -75,7 +77,7 @@ class MainViewModel : ViewModel() {
     private val _playlistState = MutableStateFlow(PlaylistDetailUiState())
     val playlistState: StateFlow<PlaylistDetailUiState> = _playlistState
 
-    private val _searchState = MutableStateFlow(SearchUiState())
+    private val _searchState = MutableStateFlow(SearchUiState(history = loadSearchHistory()))
     val searchState: StateFlow<SearchUiState> = _searchState
 
     private val _myState = MutableStateFlow(if (session.isLoggedIn) MyUiState() else MyUiState(isLoading = false))
@@ -225,20 +227,25 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    fun search(keywords: String) {
+    fun search(keywords: String, force: Boolean = false, committed: Boolean = false) {
         val trimmed = keywords.trim()
         if (trimmed.isBlank()) {
             clearSearch()
             return
         }
-        if (trimmed == _searchState.value.query && _searchState.value.results.isNotEmpty()) return
+        if (!force && trimmed == _searchState.value.query && _searchState.value.results.isNotEmpty()) return
 
         val generation = ++searchGeneration
         viewModelScope.launch {
-            _searchState.value = SearchUiState(query = trimmed, isSearching = true)
+            _searchState.value = _searchState.value.copy(
+                query = trimmed,
+                results = emptyList(),
+                isSearching = true,
+                isCommitted = committed
+            )
             repo.search(trimmed).onSuccess { resp ->
                 if (generation == searchGeneration && _searchState.value.query == trimmed) {
-                    _searchState.value = SearchUiState(query = trimmed, results = resp.songs, isSearching = false)
+                    _searchState.value = _searchState.value.copy(results = resp.songs, isSearching = false)
                 }
             }.onFailure {
                 if (generation == searchGeneration && _searchState.value.query == trimmed) {
@@ -250,8 +257,39 @@ class MainViewModel : ViewModel() {
 
     fun clearSearch() {
         searchGeneration++
-        _searchState.value = SearchUiState()
+        _searchState.value = SearchUiState(
+            history = _searchState.value.history
+        )
     }
+
+    fun submitSearch(keywords: String) {
+        val trimmed = keywords.trim()
+        if (trimmed.isBlank()) return
+        // Only explicit submissions become part of the user's search history.
+        rememberSearchHistory(trimmed)
+        search(trimmed, force = true, committed = true)
+    }
+
+    private fun rememberSearchHistory(keyword: String) {
+        val history = (listOf(keyword) + _searchState.value.history.filterNot { it.equals(keyword, ignoreCase = true) })
+            .take(12)
+        cache.put(AppCache.KEY_SEARCH_HISTORY_PREFIX + session.userId, history)
+        _searchState.value = _searchState.value.copy(history = history)
+    }
+
+    fun removeSearchHistory(keyword: String) {
+        val history = _searchState.value.history.filterNot { it == keyword }
+        cache.put(AppCache.KEY_SEARCH_HISTORY_PREFIX + session.userId, history)
+        _searchState.value = _searchState.value.copy(history = history)
+    }
+
+    fun clearSearchHistory() {
+        cache.remove(AppCache.KEY_SEARCH_HISTORY_PREFIX + session.userId)
+        _searchState.value = _searchState.value.copy(history = emptyList())
+    }
+
+    private fun loadSearchHistory(): List<String> =
+        cache.get<List<String>>(AppCache.KEY_SEARCH_HISTORY_PREFIX + session.userId).orEmpty()
 
     fun loadMyData(force: Boolean = false) {
         if (!force && !_myState.value.isLoading && (_myState.value.profile != null || _myState.value.playlists.isNotEmpty())) return
