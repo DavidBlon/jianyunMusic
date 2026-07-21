@@ -10,9 +10,13 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -20,6 +24,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
@@ -41,6 +46,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -48,6 +54,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -66,15 +73,26 @@ import androidx.navigation.compose.rememberNavController
 import coil.compose.AsyncImage
 import com.ncm.app.ui.navigation.NavGraph
 import com.ncm.app.ui.navigation.Routes
+import com.ncm.app.ui.screens.player.PlayerScreen
 import com.ncm.app.ui.theme.*
 import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.PlayerViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 
 private const val MINI_PLAYER_FADE_MILLIS = 250
+private const val PLAYER_OVERLAY_EXIT_MILLIS = 220
 private const val SPLASH_HOLD_MILLIS = 1_600L
 private const val SPLASH_FADE_MILLIS = 500
+
+internal fun retainBottomNavRoute(
+    selectedRoute: String,
+    currentRoute: String?
+): String = when (currentRoute) {
+    Routes.DISCOVER, Routes.SEARCH, Routes.MY -> currentRoute
+    else -> selectedRoute
+}
 
 class MainActivity : ComponentActivity() {
     private val notificationPermissionLauncher =
@@ -82,6 +100,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
         requestNotificationPermissionIfNeeded()
         setContent {
             val accentTheme by NeteaseApp.instance.accentThemeSettings.theme.collectAsState()
@@ -110,27 +135,38 @@ fun MainApp() {
 
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+    val routedPlayerSongId = navBackStackEntry
+        ?.takeIf { currentRoute == Routes.PLAYER }
+        ?.arguments
+        ?.getLong("songId")
     var previousRoute by remember { mutableStateOf<String?>(null) }
     var miniPlayerBlocked by remember { mutableStateOf(false) }
+    var selectedBottomRoute by rememberSaveable { mutableStateOf(Routes.DISCOVER) }
+    var playerOverlaySongId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var retainedPlayerSongId by remember { mutableStateOf<Long?>(null) }
 
+    val activePlayerSongId = playerOverlaySongId ?: routedPlayerSongId
     val showBottomBar = appState.isLoggedIn && currentRoute != Routes.LOGIN
-    val isLeavingPlayer = previousRoute == Routes.PLAYER && currentRoute != Routes.PLAYER
     val showMiniPlayer = currentRoute != Routes.LOGIN &&
-        currentRoute != Routes.PLAYER &&
+        activePlayerSongId == null &&
         playerState.currentSong != null &&
-        !isLeavingPlayer &&
         !miniPlayerBlocked
 
     LaunchedEffect(currentRoute) {
+        selectedBottomRoute = retainBottomNavRoute(selectedBottomRoute, currentRoute)
         if (previousRoute == Routes.SEARCH && currentRoute != Routes.SEARCH) {
             mainViewModel.clearSearch()
         }
-        if (isLeavingPlayer) {
-            miniPlayerBlocked = true
-            delay(250)
+        previousRoute = currentRoute
+    }
+
+    LaunchedEffect(activePlayerSongId) {
+        if (activePlayerSongId != null) {
+            retainedPlayerSongId = activePlayerSongId
+        } else if (miniPlayerBlocked) {
+            delay(PLAYER_OVERLAY_EXIT_MILLIS.toLong())
             miniPlayerBlocked = false
         }
-        previousRoute = currentRoute
     }
 
     LaunchedEffect(appState.isLoggedIn, currentRoute) {
@@ -141,21 +177,39 @@ fun MainApp() {
         }
     }
 
+    val onBottomNavigate: (String) -> Unit = remember(navController) {
+        { route ->
+            selectedBottomRoute = route
+            if (navController.currentDestination?.route != route) {
+                navController.navigate(route) {
+                    popUpTo(Routes.DISCOVER)
+                    launchSingleTop = true
+                }
+            }
+        }
+    }
+    val onOpenPlayer: (Long) -> Unit = remember {
+        { songId -> playerOverlaySongId = songId }
+    }
+    val onClosePlayer: () -> Unit = remember(navController) {
+        {
+            miniPlayerBlocked = true
+            playerOverlaySongId = null
+            if (navController.currentDestination?.route == Routes.PLAYER) {
+                navController.popBackStack()
+            }
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             containerColor = DarkBg,
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
             bottomBar = {
                 if (showBottomBar) {
                     BottomNavigationBar(
-                        currentRoute = currentRoute,
-                        onNavigate = { route ->
-                            if (route != currentRoute) {
-                                navController.navigate(route) {
-                                    popUpTo(Routes.DISCOVER)
-                                    launchSingleTop = true
-                                }
-                            }
-                        }
+                        currentRoute = selectedBottomRoute,
+                        onNavigate = onBottomNavigate
                     )
                 }
             }
@@ -170,6 +224,7 @@ fun MainApp() {
                     isLoggedIn = appState.isLoggedIn,
                     mainViewModel = mainViewModel,
                     playerViewModel = playerViewModel,
+                    onOpenPlayer = onOpenPlayer,
                     modifier = Modifier.fillMaxSize()
                 )
 
@@ -188,16 +243,36 @@ fun MainApp() {
                         onPlayPause = { playerViewModel.togglePlay() },
                         onPrevious = { playerViewModel.playPrev() },
                         onNext = { playerViewModel.playNext() },
-                        onClick = {
-                            playerState.currentSong?.let {
-                                if (currentRoute != Routes.player(it.id)) {
-                                    navController.navigate(Routes.player(it.id)) {
-                                        launchSingleTop = true
-                                    }
-                                }
-                            }
-                        }
+                        onClick = { playerState.currentSong?.id?.let(onOpenPlayer) }
                     )
+                }
+            }
+        }
+
+        val displayedPlayerSongId = activePlayerSongId ?: retainedPlayerSongId
+        AnimatedVisibility(
+            visible = activePlayerSongId != null && displayedPlayerSongId != null,
+            enter = EnterTransition.None,
+            exit = fadeOut(animationSpec = tween(PLAYER_OVERLAY_EXIT_MILLIS)),
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    // Keep empty areas of the player from controlling the
+                    // still-mounted screen underneath. Child controls get
+                    // first chance to consume their own gestures.
+                    detectTapGestures(onTap = {})
+                }
+        ) {
+            displayedPlayerSongId?.let { songId ->
+                PlayerScreen(
+                    songId = songId,
+                    onBack = onClosePlayer,
+                    mainViewModel = mainViewModel,
+                    viewModel = playerViewModel
+                )
+                PredictiveBackHandler(enabled = activePlayerSongId != null) { backProgress ->
+                    backProgress.collect { }
+                    onClosePlayer()
                 }
             }
         }
@@ -214,7 +289,11 @@ private fun AppUpdatePrompt() {
     var update by remember { mutableStateOf<UpdateInfo?>(null) }
 
     LaunchedEffect(Unit) {
-        update = GitHubUpdateChecker.check(BuildConfig.VERSION_NAME)
+        val installedVersion = context.packageManager
+            .getPackageInfo(context.packageName, 0)
+            .versionName
+            ?: BuildConfig.VERSION_NAME
+        update = GitHubUpdateChecker.check(installedVersion)
     }
 
     DisposableEffect(installer) {
@@ -376,7 +455,6 @@ private fun BottomNavigationBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(68.dp)
                 .background(Color(0xD60A0A0C))
                 .drawBehind {
                     drawLine(
@@ -386,6 +464,8 @@ private fun BottomNavigationBar(
                         strokeWidth = 1f
                     )
                 }
+                .navigationBarsPadding()
+                .height(68.dp)
                 .padding(top = 8.dp, bottom = 4.dp),
             horizontalArrangement = Arrangement.SpaceAround,
             verticalAlignment = Alignment.CenterVertically

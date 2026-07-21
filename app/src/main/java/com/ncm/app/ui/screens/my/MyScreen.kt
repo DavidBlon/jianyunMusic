@@ -52,7 +52,8 @@ fun MyScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(DarkBg),
+            .background(DarkBg)
+            .statusBarsPadding(),
         contentPadding = PaddingValues(bottom = 92.dp)
     ) {
         item { ProfileHeader(profile = state.profile) }

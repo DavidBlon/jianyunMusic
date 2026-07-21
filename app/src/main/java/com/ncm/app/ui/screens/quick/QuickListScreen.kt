@@ -41,6 +41,7 @@ fun QuickListScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(DarkBg)
+            .statusBarsPadding()
     ) {
         Row(
             modifier = Modifier

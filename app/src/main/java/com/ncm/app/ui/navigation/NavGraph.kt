@@ -13,7 +13,6 @@ import androidx.navigation.navArgument
 import com.ncm.app.ui.screens.discover.DiscoverScreen
 import com.ncm.app.ui.screens.login.LoginScreen
 import com.ncm.app.ui.screens.my.MyScreen
-import com.ncm.app.ui.screens.player.PlayerScreen
 import com.ncm.app.ui.screens.playlist.PlaylistDetailScreen
 import com.ncm.app.ui.screens.quick.QuickListScreen
 import com.ncm.app.ui.screens.search.SearchScreen
@@ -40,6 +39,7 @@ fun NavGraph(
     isLoggedIn: Boolean,
     mainViewModel: MainViewModel,
     playerViewModel: PlayerViewModel,
+    onOpenPlayer: (Long) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val startDestination = if (isLoggedIn) Routes.DISCOVER else Routes.LOGIN
@@ -56,7 +56,7 @@ fun NavGraph(
         composable(Routes.DISCOVER) {
             DiscoverScreen(
                 onPlaylistClick = { id -> navController.navigate(Routes.playlistDetail(id)) },
-                onSongClick = { id -> navController.navigate(Routes.player(id)) },
+                onSongClick = onOpenPlayer,
                 onSearchClick = { navController.navigate(Routes.SEARCH) },
                 onQuickClick = { type -> navController.navigate(Routes.quick(type)) },
                 viewModel = mainViewModel
@@ -72,7 +72,7 @@ fun NavGraph(
                 type = type,
                 onBack = { navController.popBackStack() },
                 onPlaylistClick = { id -> navController.navigate(Routes.playlistDetail(id)) },
-                onSongClick = { id -> navController.navigate(Routes.player(id)) },
+                onSongClick = onOpenPlayer,
                 viewModel = mainViewModel
             )
         }
@@ -89,7 +89,7 @@ fun NavGraph(
                         val startIndex = songs.indexOfFirst { it.id == id }.coerceAtLeast(0)
                         playerViewModel.setQueue(songs, startIndex)
                     }
-                    navController.navigate(Routes.player(id))
+                    onOpenPlayer(id)
                 },
                 onBack = { navController.popBackStack() },
                 viewModel = mainViewModel
@@ -104,13 +104,9 @@ fun NavGraph(
             popEnterTransition = { null },
             popExitTransition = { fadeOut(animationSpec = tween(250)) }
         ) { backStackEntry ->
-            val songId = backStackEntry.arguments?.getLong("songId") ?: return@composable
-            PlayerScreen(
-                songId = songId,
-                onBack = { navController.popBackStack() },
-                mainViewModel = mainViewModel,
-                viewModel = playerViewModel
-            )
+            // The player is rendered as a top-level overlay by MainApp so the
+            // Scaffold and bottom navigation remain mounted and unchanged.
+            backStackEntry.arguments?.getLong("songId") ?: return@composable
         }
 
         composable(Routes.SEARCH) {
@@ -120,7 +116,7 @@ fun NavGraph(
                         val startIndex = songs.indexOfFirst { it.id == id }.coerceAtLeast(0)
                         playerViewModel.setQueue(songs, startIndex)
                     }
-                    navController.navigate(Routes.player(id))
+                    onOpenPlayer(id)
                 },
                 onPlayNext = { song -> playerViewModel.enqueueNext(song) },
                 viewModel = mainViewModel
@@ -130,7 +126,7 @@ fun NavGraph(
         composable(Routes.MY) {
             MyScreen(
                 onPlaylistClick = { id -> navController.navigate(Routes.playlistDetail(id)) },
-                onSongClick = { id -> navController.navigate(Routes.player(id)) },
+                onSongClick = onOpenPlayer,
                 onLogout = {
                     mainViewModel.logout()
                 },

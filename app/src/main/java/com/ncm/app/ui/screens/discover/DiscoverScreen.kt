@@ -54,7 +54,8 @@ fun DiscoverScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(DarkBg),
+            .background(DarkBg)
+            .statusBarsPadding(),
         contentPadding = PaddingValues(bottom = 96.dp)
     ) {
         item { Header(profile = profile) }

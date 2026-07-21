@@ -1,5 +1,9 @@
 package com.ncm.app.ui.screens.player
 
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -7,13 +11,16 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -29,6 +36,9 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.HighQuality
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Repeat
 import androidx.compose.material.icons.outlined.RepeatOne
 import androidx.compose.material.icons.outlined.Shuffle
@@ -36,12 +46,15 @@ import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.*
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
@@ -53,11 +66,22 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.media3.common.MediaItem
+import androidx.media3.common.C
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.ncm.app.ui.theme.*
 import com.ncm.app.NeteaseApp
@@ -66,6 +90,7 @@ import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.PlayMode
 import com.ncm.app.viewmodel.PlaybackQuality
 import com.ncm.app.viewmodel.PlayerViewModel
+import kotlin.math.abs
 import kotlin.math.sin
 
 @Composable
@@ -77,10 +102,26 @@ fun PlayerScreen(
 ) {
     val state by viewModel.state.collectAsState()
     var qualityMenuExpanded by remember { mutableStateOf(false) }
-    var showLyrics by remember(songId) { mutableStateOf(false) }
     var bottomPanel by remember { mutableStateOf<PlayerBottomPanel?>(null) }
-    val playerLayout by NeteaseApp.instance.playerAppearanceSettings.layout.collectAsState()
-    val playerBackground by NeteaseApp.instance.playerAppearanceSettings.background.collectAsState()
+    val appearanceSettings = NeteaseApp.instance.playerAppearanceSettings
+    val playerLayout by appearanceSettings.layout.collectAsState()
+    val playerBackground by appearanceSettings.background.collectAsState()
+    val customBackground by appearanceSettings.customBackground.collectAsState()
+    val componentVisibility by appearanceSettings.componentVisibility.collectAsState()
+    val showLyrics by appearanceSettings.showLyrics.collectAsState()
+    val context = LocalContext.current
+    val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        try {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (_: SecurityException) {
+            // The system photo picker may already own the long-lived grant.
+        }
+        appearanceSettings.setCustomBackground(uri.toString(), context.contentResolver.getType(uri))
+    }
 
     LaunchedEffect(songId) {
         viewModel.open(songId)
@@ -88,8 +129,13 @@ fun PlayerScreen(
 
     var rotation by remember { mutableFloatStateOf(0f) }
 
-    LaunchedEffect(state.isPlaying) {
-        if (!state.isPlaying) return@LaunchedEffect
+    val shouldRotateDisc = state.isPlaying &&
+        componentVisibility.artwork &&
+        !showLyrics &&
+        playerLayout == PlayerLayout.DISC
+
+    LaunchedEffect(shouldRotateDisc) {
+        if (!shouldRotateDisc) return@LaunchedEffect
         var lastFrame = withFrameMillis { it }
         while (true) {
             val frame = withFrameMillis { it }
@@ -104,7 +150,17 @@ fun PlayerScreen(
             .fillMaxSize()
             .background(Brush.verticalGradient(listOf(Color(0xFF1A0A0A), DarkBg)))
     ) {
-        PlayerAtmosphere(background = playerBackground)
+        customBackground?.let { media ->
+            CustomMediaBackground(
+                media = media,
+                initialVideoPositionMs = appearanceSettings.videoResumePosition(media.uri),
+                onVideoPositionSaved = appearanceSettings::saveVideoResumePosition
+            )
+            CustomBackgroundScrim()
+        }
+        if (customBackground?.type != PlayerCustomMediaType.VIDEO) {
+            PlayerAtmosphere(background = playerBackground)
+        }
         PlayerTopBar(
             title = state.currentSong?.name ?: "未知歌曲",
             subtitle = state.currentSong?.artistText ?: "未知歌手",
@@ -118,48 +174,54 @@ fun PlayerScreen(
                 }
             },
             onAppearanceClick = { bottomPanel = PlayerBottomPanel.APPEARANCE },
-            modifier = Modifier.align(Alignment.TopCenter)
+            showSongInfo = componentVisibility.songInfo,
+            showFavorite = componentVisibility.favorite,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
         )
 
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(top = 92.dp, bottom = 196.dp, start = 24.dp, end = 24.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            val unavailableMessage = state.error?.takeIf {
-                state.songUrl.isNullOrBlank() && !state.isLoading && !state.isPlaying
-            }
-            if (unavailableMessage != null) {
-                UnavailablePanel(message = unavailableMessage)
-            } else if (showLyrics) {
-                LyricsPanel(
-                    lyric = state.lyric,
-                    tlyric = state.tlyric,
-                    currentPosition = state.currentPosition,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) { showLyrics = false }
-                )
-            } else {
-                val coverModifier = Modifier.clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null
-                ) { showLyrics = true }
-                if (playerLayout == PlayerLayout.DISC) {
-                    Disc(
-                        coverUrl = state.currentSong?.album?.picUrl,
-                        rotation = rotation,
-                        modifier = coverModifier
+        val unavailableMessage = state.error?.takeIf {
+            state.songUrl.isNullOrBlank() && !state.isLoading && !state.isPlaying
+        }
+        if (unavailableMessage != null || componentVisibility.artwork) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = 92.dp, bottom = 196.dp, start = 24.dp, end = 24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                if (unavailableMessage != null) {
+                    UnavailablePanel(message = unavailableMessage)
+                } else if (showLyrics) {
+                    LyricsPanel(
+                        lyric = state.lyric,
+                        tlyric = state.tlyric,
+                        currentPosition = state.currentPosition,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) { appearanceSettings.setShowLyrics(false) }
                     )
                 } else {
-                    AlbumCover(
-                        coverUrl = state.currentSong?.album?.picUrl,
-                        modifier = coverModifier
-                    )
+                    val coverModifier = Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { appearanceSettings.setShowLyrics(true) }
+                    if (playerLayout == PlayerLayout.DISC) {
+                        Disc(
+                            coverUrl = state.currentSong?.album?.picUrl,
+                            rotation = rotation,
+                            modifier = coverModifier
+                        )
+                    } else {
+                        AlbumCover(
+                            coverUrl = state.currentSong?.album?.picUrl,
+                            modifier = coverModifier
+                        )
+                    }
                 }
             }
         }
@@ -177,25 +239,32 @@ fun PlayerScreen(
             )
         }
 
-        PlayerControls(
-            progress = state.progress,
-            currentPosition = state.currentPosition,
-            duration = state.duration,
-            playMode = state.playMode,
-            isPlaying = state.isPlaying,
-            quality = state.quality,
-            qualityMenuExpanded = qualityMenuExpanded,
-            onQualityMenuExpandedChange = { qualityMenuExpanded = it },
-            onPlayModeClick = { viewModel.togglePlayMode() },
-            onPrevClick = { viewModel.playPrev() },
-            onPlayPauseClick = { viewModel.togglePlay() },
-            onNextClick = { viewModel.playNext() },
-            onSeek = { viewModel.setProgress(it) },
-            onQualityClick = { viewModel.setQuality(it) },
-            onQueueClick = { bottomPanel = PlayerBottomPanel.QUEUE },
-            onSleepClick = { bottomPanel = PlayerBottomPanel.SLEEP },
-            modifier = Modifier.align(Alignment.BottomCenter)
-        )
+        if (componentVisibility.progress || componentVisibility.transport || componentVisibility.extras) {
+            PlayerControls(
+                progress = state.progress,
+                currentPosition = state.currentPosition,
+                duration = state.duration,
+                playMode = state.playMode,
+                isPlaying = state.isPlaying,
+                quality = state.quality,
+                qualityMenuExpanded = qualityMenuExpanded,
+                showProgress = componentVisibility.progress,
+                showTransport = componentVisibility.transport,
+                showExtras = componentVisibility.extras,
+                onQualityMenuExpandedChange = { qualityMenuExpanded = it },
+                onPlayModeClick = { viewModel.togglePlayMode() },
+                onPrevClick = { viewModel.playPrev() },
+                onPlayPauseClick = { viewModel.togglePlay() },
+                onNextClick = { viewModel.playNext() },
+                onSeek = { viewModel.setProgress(it) },
+                onQualityClick = { viewModel.setQuality(it) },
+                onQueueClick = { bottomPanel = PlayerBottomPanel.QUEUE },
+                onSleepClick = { bottomPanel = PlayerBottomPanel.SLEEP },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+            )
+        }
     }
 
     when (bottomPanel) {
@@ -217,9 +286,20 @@ fun PlayerScreen(
         PlayerBottomPanel.APPEARANCE -> AppearanceSheet(
             layout = playerLayout,
             background = playerBackground,
+            customBackground = customBackground,
+            componentVisibility = componentVisibility,
             onDismiss = { bottomPanel = null },
-            onLayoutSelected = NeteaseApp.instance.playerAppearanceSettings::setLayout,
-            onBackgroundSelected = NeteaseApp.instance.playerAppearanceSettings::setBackground
+            onPickMedia = {
+                mediaPicker.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                )
+            },
+            onClearMedia = appearanceSettings::clearCustomBackground,
+            onLayoutSelected = appearanceSettings::setLayout,
+            onBackgroundSelected = appearanceSettings::setBackground,
+            onComponentVisibilityChanged = appearanceSettings::setComponentVisible,
+            onApplyImmersivePreset = appearanceSettings::applyImmersivePreset,
+            onResetComponents = appearanceSettings::resetComponentVisibility
         )
         null -> Unit
     }
@@ -266,6 +346,8 @@ private fun PlayerTopBar(
     isLikeUpdating: Boolean,
     onLikeClick: () -> Unit,
     onAppearanceClick: () -> Unit,
+    showSongInfo: Boolean,
+    showFavorite: Boolean,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -273,42 +355,49 @@ private fun PlayerTopBar(
             .fillMaxWidth()
             .padding(top = 8.dp),
     ) {
-        IconButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterStart).padding(start = 8.dp)) {
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(start = 8.dp)
+        ) {
             Icon(
                 imageVector = androidx.compose.material.icons.Icons.Filled.KeyboardArrowDown,
-                contentDescription = null,
+                contentDescription = "返回",
                 tint = TextPrimary,
                 modifier = Modifier.size(28.dp)
             )
         }
-        Column(
-            modifier = Modifier.align(Alignment.Center).padding(horizontal = 72.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center,
-                modifier = Modifier.fillMaxWidth()
+        if (showSongInfo) {
+            Column(
+                modifier = Modifier.align(Alignment.Center).padding(horizontal = 112.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextPrimary,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    AudioSourceTag(source = audioSource)
+                }
                 Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = TextPrimary,
-                    fontWeight = FontWeight.SemiBold,
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TextTertiary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false)
+                    modifier = Modifier.padding(top = 2.dp)
                 )
-                AudioSourceTag(source = audioSource)
             }
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.labelMedium,
-                color = TextTertiary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 2.dp)
-            )
         }
         Row(
             modifier = Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
@@ -322,14 +411,15 @@ private fun PlayerTopBar(
                     modifier = Modifier.size(22.dp)
                 )
             }
-            // Keeps the title anchored to the screen center while retaining the right action.
-            IconButton(onClick = onLikeClick, enabled = !isLikeUpdating) {
-                Icon(
-                    imageVector = if (isLiked) androidx.compose.material.icons.Icons.Filled.Favorite else androidx.compose.material.icons.Icons.Outlined.FavoriteBorder,
-                    contentDescription = null,
-                    tint = if (isLiked) RedAccent else TextPrimary,
-                    modifier = Modifier.size(24.dp)
-                )
+            if (showFavorite) {
+                IconButton(onClick = onLikeClick, enabled = !isLikeUpdating) {
+                    Icon(
+                        imageVector = if (isLiked) androidx.compose.material.icons.Icons.Filled.Favorite else androidx.compose.material.icons.Icons.Outlined.FavoriteBorder,
+                        contentDescription = if (isLiked) "取消收藏" else "收藏",
+                        tint = if (isLiked) RedAccent else TextPrimary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
             }
         }
     }
@@ -406,6 +496,126 @@ private fun AlbumCover(
 }
 
 @Composable
+private fun CustomMediaBackground(
+    media: PlayerCustomBackground,
+    initialVideoPositionMs: Long,
+    onVideoPositionSaved: (String, Long) -> Unit
+) {
+    when (media.type) {
+        PlayerCustomMediaType.IMAGE -> AsyncImage(
+            model = media.uri,
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop
+        )
+
+        PlayerCustomMediaType.VIDEO -> MutedLoopingVideo(
+            uri = media.uri,
+            initialPositionMs = initialVideoPositionMs,
+            onPositionSaved = { positionMs -> onVideoPositionSaved(media.uri, positionMs) }
+        )
+    }
+}
+
+@Composable
+private fun MutedLoopingVideo(
+    uri: String,
+    initialPositionMs: Long,
+    onPositionSaved: (Long) -> Unit
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val currentPositionSaver by rememberUpdatedState(onPositionSaved)
+    var firstFrameRendered by remember(uri) { mutableStateOf(false) }
+    val firstFrameAlpha by animateFloatAsState(
+        targetValue = if (firstFrameRendered) 1f else 0f,
+        animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing),
+        label = "videoFirstFrameAlpha"
+    )
+    val player = remember(uri) {
+        ExoPlayer.Builder(context).build().apply {
+            trackSelectionParameters = trackSelectionParameters
+                .buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                .setMaxVideoSize(1280, 720)
+                .setMaxVideoFrameRate(30)
+                .setMaxVideoBitrate(2_500_000)
+                .build()
+            addListener(object : Player.Listener {
+                override fun onRenderedFirstFrame() {
+                    firstFrameRendered = true
+                }
+            })
+            setMediaItem(MediaItem.fromUri(uri))
+            if (initialPositionMs > 0L) {
+                seekTo(initialPositionMs)
+            }
+            repeatMode = Player.REPEAT_MODE_ONE
+            volume = 0f
+            playWhenReady = true
+            prepare()
+        }
+    }
+
+    DisposableEffect(player, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> player.play()
+                Lifecycle.Event.ON_STOP -> {
+                    currentPositionSaver(player.currentPosition)
+                    player.pause()
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            currentPositionSaver(player.currentPosition)
+            player.release()
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        AndroidView(
+            factory = { viewContext ->
+                PlayerView(viewContext).apply {
+                    useController = false
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                    setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    this.player = player
+                }
+            },
+            update = { it.player = player },
+            modifier = Modifier.fillMaxSize()
+        )
+        if (firstFrameAlpha < 1f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 1f - firstFrameAlpha))
+            )
+        }
+    }
+}
+
+@Composable
+private fun CustomBackgroundScrim() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    0f to Color.Black.copy(alpha = 0.54f),
+                    0.42f to Color.Black.copy(alpha = 0.18f),
+                    1f to Color.Black.copy(alpha = 0.68f)
+                )
+            )
+    )
+}
+
+@Composable
 private fun PlayerAtmosphere(background: PlayerBackground) {
     if (background == PlayerBackground.NONE) return
 
@@ -477,6 +687,37 @@ private data class LyricLine(
 
 private const val LYRIC_VISUAL_OFFSET_MS = 150L
 
+internal enum class LyricScrollMotion {
+    NONE,
+    SNAP,
+    ANIMATE
+}
+
+internal data class LyricScrollPlan(
+    val targetIndex: Int,
+    val motion: LyricScrollMotion
+)
+
+internal fun planLyricScroll(
+    previousActiveIndex: Int?,
+    activeIndex: Int
+): LyricScrollPlan {
+    val safeActiveIndex = activeIndex.coerceAtLeast(0)
+    val targetIndex = (safeActiveIndex - 3).coerceAtLeast(0)
+    if (previousActiveIndex == null) {
+        return LyricScrollPlan(targetIndex, LyricScrollMotion.SNAP)
+    }
+
+    val safePreviousIndex = previousActiveIndex.coerceAtLeast(0)
+    val previousTargetIndex = (safePreviousIndex - 3).coerceAtLeast(0)
+    val motion = when {
+        previousTargetIndex == targetIndex -> LyricScrollMotion.NONE
+        abs(safeActiveIndex - safePreviousIndex) <= 2 -> LyricScrollMotion.ANIMATE
+        else -> LyricScrollMotion.SNAP
+    }
+    return LyricScrollPlan(targetIndex, motion)
+}
+
 @Composable
 private fun LyricsPanel(
     lyric: String?,
@@ -485,18 +726,27 @@ private fun LyricsPanel(
     modifier: Modifier = Modifier
 ) {
     val lines = remember(lyric, tlyric) { mergeLyrics(lyric, tlyric) }
-    val listState = rememberLazyListState()
     val lyricPosition = (currentPosition + LYRIC_VISUAL_OFFSET_MS).coerceAtLeast(0)
     val activeIndex = remember(lines, lyricPosition) {
         lines.indexOfLast { it.timeMs <= lyricPosition }.coerceAtLeast(0)
     }
+    val initialScrollPlan = remember(lyric, tlyric) {
+        planLyricScroll(previousActiveIndex = null, activeIndex = activeIndex)
+    }
+    val listState = remember(lyric, tlyric) {
+        LazyListState(firstVisibleItemIndex = initialScrollPlan.targetIndex)
+    }
+    var lastActiveIndex by remember(lyric, tlyric) { mutableIntStateOf(activeIndex) }
 
     LaunchedEffect(activeIndex, lines.size) {
         if (lines.isNotEmpty()) {
-            listState.animateScrollToItem(
-                index = (activeIndex - 3).coerceAtLeast(0),
-                scrollOffset = 0
-            )
+            val plan = planLyricScroll(lastActiveIndex, activeIndex)
+            lastActiveIndex = activeIndex
+            when (plan.motion) {
+                LyricScrollMotion.NONE -> Unit
+                LyricScrollMotion.SNAP -> listState.scrollToItem(plan.targetIndex)
+                LyricScrollMotion.ANIMATE -> listState.animateScrollToItem(plan.targetIndex)
+            }
         }
     }
 
@@ -615,6 +865,9 @@ private fun PlayerControls(
     isPlaying: Boolean,
     quality: PlaybackQuality,
     qualityMenuExpanded: Boolean,
+    showProgress: Boolean,
+    showTransport: Boolean,
+    showExtras: Boolean,
     onQualityMenuExpandedChange: (Boolean) -> Unit,
     onPlayModeClick: () -> Unit,
     onPrevClick: () -> Unit,
@@ -629,107 +882,129 @@ private fun PlayerControls(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .height(174.dp)
-            .padding(horizontal = 24.dp),
+            .wrapContentHeight()
+            .padding(horizontal = 24.dp, vertical = 24.dp),
         verticalArrangement = Arrangement.Bottom
     ) {
-        Box(modifier = Modifier.fillMaxWidth().height(26.dp)) {
-            TextButton(
-                onClick = onQueueClick,
-                contentPadding = PaddingValues(0.dp),
-                modifier = Modifier.align(Alignment.CenterStart).width(64.dp)
-            ) {
-                Text("列表", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
-            }
-            TextButton(
-                onClick = onSleepClick,
-                contentPadding = PaddingValues(0.dp),
-                modifier = Modifier.align(Alignment.CenterEnd).width(64.dp)
-            ) {
-                Text("定时", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+        if (showExtras) {
+            Box(modifier = Modifier.fillMaxWidth().height(32.dp)) {
+                TextButton(
+                    onClick = onQueueClick,
+                    contentPadding = PaddingValues(0.dp),
+                    modifier = Modifier.align(Alignment.CenterStart).widthIn(min = 64.dp)
+                ) {
+                    Text("列表", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                }
+                TextButton(
+                    onClick = onSleepClick,
+                    contentPadding = PaddingValues(0.dp),
+                    modifier = Modifier.align(Alignment.CenterEnd).widthIn(min = 64.dp)
+                ) {
+                    Text("定时", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                }
             }
         }
-        ProgressBar(progress = progress, currentPosition = currentPosition, duration = duration, onSeek = onSeek)
+        if (showProgress) {
+            ProgressBar(
+                progress = progress,
+                currentPosition = currentPosition,
+                duration = duration,
+                onSeek = onSeek
+            )
+        }
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 16.dp, bottom = 30.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onPlayModeClick) {
-                Icon(
-                    imageVector = when (playMode) {
-                        PlayMode.SEQUENCE -> androidx.compose.material.icons.Icons.Outlined.Repeat
-                        PlayMode.SHUFFLE -> androidx.compose.material.icons.Icons.Outlined.Shuffle
-                        PlayMode.REPEAT_ONE -> androidx.compose.material.icons.Icons.Outlined.RepeatOne
-                    },
-                    contentDescription = null,
-                    tint = TextSecondary,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
-
-            IconButton(onClick = onPrevClick) {
-                Icon(androidx.compose.material.icons.Icons.Filled.SkipPrevious, null, tint = TextPrimary, modifier = Modifier.size(28.dp))
-            }
-
-            Box(
+        if (showTransport || showExtras) {
+            Row(
                 modifier = Modifier
-                    .size(64.dp)
-                    .clip(CircleShape)
-                    .background(Green500),
-                contentAlignment = Alignment.Center
+                    .fillMaxWidth()
+                    .padding(top = 16.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onPlayPauseClick) {
-                    Icon(
-                        imageVector = if (isPlaying) androidx.compose.material.icons.Icons.Filled.Pause else androidx.compose.material.icons.Icons.Filled.PlayArrow,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(32.dp)
-                    )
-                }
-            }
-
-            IconButton(onClick = onNextClick) {
-                Icon(androidx.compose.material.icons.Icons.Filled.SkipNext, null, tint = TextPrimary, modifier = Modifier.size(28.dp))
-            }
-
-            Box {
-                IconButton(onClick = { onQualityMenuExpandedChange(true) }) {
-                    Icon(
-                        imageVector = androidx.compose.material.icons.Icons.Outlined.HighQuality,
-                        contentDescription = null,
-                        tint = TextSecondary,
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-                DropdownMenu(
-                    expanded = qualityMenuExpanded,
-                    onDismissRequest = { onQualityMenuExpandedChange(false) },
-                    containerColor = DarkSurface
-                ) {
-                    PlaybackQuality.entries.forEach { item ->
-                        DropdownMenuItem(
-                            text = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        item.label,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = if (item == quality) Green500 else TextPrimary
-                                    )
-                                    if (item == quality) {
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text("当前", style = MaterialTheme.typography.labelSmall, color = Green500)
-                                    }
-                                }
+                if (showExtras) {
+                    IconButton(onClick = onPlayModeClick) {
+                        Icon(
+                            imageVector = when (playMode) {
+                                PlayMode.SEQUENCE -> androidx.compose.material.icons.Icons.Outlined.Repeat
+                                PlayMode.SHUFFLE -> androidx.compose.material.icons.Icons.Outlined.Shuffle
+                                PlayMode.REPEAT_ONE -> androidx.compose.material.icons.Icons.Outlined.RepeatOne
                             },
-                            onClick = {
-                                onQualityMenuExpandedChange(false)
-                                onQualityClick(item)
-                            }
+                            contentDescription = "切换播放模式",
+                            tint = TextSecondary,
+                            modifier = Modifier.size(22.dp)
                         )
+                    }
+                }
+
+                if (showTransport) {
+                    IconButton(onClick = onPrevClick) {
+                        Icon(
+                            androidx.compose.material.icons.Icons.Filled.SkipPrevious,
+                            "上一首",
+                            tint = TextPrimary,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = onPlayPauseClick,
+                        modifier = Modifier.size(64.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (isPlaying) androidx.compose.material.icons.Icons.Filled.Pause else androidx.compose.material.icons.Icons.Filled.PlayArrow,
+                            contentDescription = if (isPlaying) "暂停" else "播放",
+                            tint = Color.White,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+
+                    IconButton(onClick = onNextClick) {
+                        Icon(
+                            androidx.compose.material.icons.Icons.Filled.SkipNext,
+                            "下一首",
+                            tint = TextPrimary,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+                }
+
+                if (showExtras) {
+                    Box {
+                        IconButton(onClick = { onQualityMenuExpandedChange(true) }) {
+                            Icon(
+                                imageVector = androidx.compose.material.icons.Icons.Outlined.HighQuality,
+                                contentDescription = "选择音质",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = qualityMenuExpanded,
+                            onDismissRequest = { onQualityMenuExpandedChange(false) },
+                            containerColor = DarkSurface
+                        ) {
+                            PlaybackQuality.entries.forEach { item ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                item.label,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = if (item == quality) Green500 else TextPrimary
+                                            )
+                                            if (item == quality) {
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text("当前", style = MaterialTheme.typography.labelSmall, color = Green500)
+                                            }
+                                        }
+                                    },
+                                    onClick = {
+                                        onQualityMenuExpandedChange(false)
+                                        onQualityClick(item)
+                                    }
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -793,8 +1068,12 @@ private fun SleepTimerSheet(
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = DarkSurface) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp)) {
-            Text("睡眠定时", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-            Text(remainingSeconds?.let { "将在 ${it / 60}:${"%02d".format(it % 60)} 后暂停播放" } ?: "到时间后自动暂停播放", color = TextTertiary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp, bottom = 14.dp))
+            Text(
+                "睡眠定时",
+                style = MaterialTheme.typography.titleMedium,
+                color = TextPrimary,
+                modifier = Modifier.padding(bottom = 14.dp)
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 listOf(15, 30, 60).forEach { minutes ->
                     OutlinedButton(onClick = { onSet(minutes); onDismiss() }, modifier = Modifier.weight(1f)) { Text("${minutes}分") }
@@ -810,25 +1089,64 @@ private fun SleepTimerSheet(
 private fun AppearanceSheet(
     layout: PlayerLayout,
     background: PlayerBackground,
+    customBackground: PlayerCustomBackground?,
+    componentVisibility: PlayerComponentVisibility,
     onDismiss: () -> Unit,
+    onPickMedia: () -> Unit,
+    onClearMedia: () -> Unit,
     onLayoutSelected: (PlayerLayout) -> Unit,
-    onBackgroundSelected: (PlayerBackground) -> Unit
+    onBackgroundSelected: (PlayerBackground) -> Unit,
+    onComponentVisibilityChanged: (PlayerComponent, Boolean) -> Unit,
+    onApplyImmersivePreset: () -> Unit,
+    onResetComponents: () -> Unit
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = DarkSurface) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(max = 720.dp)
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp, vertical = 8.dp)
-                .padding(bottom = 20.dp)
+                .padding(bottom = 28.dp)
         ) {
             Text("播放页个性化", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-            Text(
-                "动效只在背景层显示，不影响歌词阅读。",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextTertiary,
-                modifier = Modifier.padding(top = 6.dp, bottom = 16.dp)
+
+            AppearanceSectionTitle("我的背景", modifier = Modifier.padding(top = 24.dp))
+            CustomBackgroundCard(
+                media = customBackground,
+                onPickMedia = onPickMedia,
+                onClearMedia = onClearMedia,
+                modifier = Modifier.padding(top = 8.dp)
             )
-            Text("布局", style = MaterialTheme.typography.labelLarge, color = TextSecondary)
+
+            AppearanceSectionTitle("界面组件", modifier = Modifier.padding(top = 24.dp))
+            PlayerComponent.entries.forEach { component ->
+                ComponentVisibilityRow(
+                    component = component,
+                    checked = componentVisibility.isVisible(component),
+                    onCheckedChange = { onComponentVisibilityChanged(component, it) }
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Button(
+                    onClick = onApplyImmersivePreset,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Green500)
+                ) {
+                    Text("一键沉浸")
+                }
+                OutlinedButton(
+                    onClick = onResetComponents,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                ) {
+                    Text("恢复默认")
+                }
+            }
+
+            AppearanceSectionTitle("封面版式", modifier = Modifier.padding(top = 24.dp))
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -842,12 +1160,7 @@ private fun AppearanceSheet(
                     )
                 }
             }
-            Text(
-                "动态背景",
-                style = MaterialTheme.typography.labelLarge,
-                color = TextSecondary,
-                modifier = Modifier.padding(top = 22.dp)
-            )
+            AppearanceSectionTitle("氛围动效", modifier = Modifier.padding(top = 24.dp))
             PlayerBackground.entries.chunked(2).forEach { row ->
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -865,6 +1178,115 @@ private fun AppearanceSheet(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AppearanceSectionTitle(
+    text: String,
+    modifier: Modifier = Modifier
+) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge,
+        color = TextSecondary,
+        fontWeight = FontWeight.SemiBold,
+        modifier = modifier
+    )
+}
+
+@Composable
+private fun CustomBackgroundCard(
+    media: PlayerCustomBackground?,
+    onPickMedia: () -> Unit,
+    onClearMedia: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = DarkSurface2
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Green500.copy(alpha = 0.14f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (media?.type == PlayerCustomMediaType.VIDEO) {
+                            androidx.compose.material.icons.Icons.Outlined.Movie
+                        } else {
+                            androidx.compose.material.icons.Icons.Outlined.Image
+                        },
+                        contentDescription = null,
+                        tint = Green500,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Text(
+                    text = when (media?.type) {
+                        PlayerCustomMediaType.IMAGE -> "已使用相册照片"
+                        PlayerCustomMediaType.VIDEO -> "已使用静音循环视频"
+                        null -> "使用照片或视频"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextPrimary,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f).padding(start = 12.dp)
+                )
+                if (media != null) {
+                    IconButton(onClick = onClearMedia) {
+                        Icon(
+                            androidx.compose.material.icons.Icons.Outlined.DeleteOutline,
+                            contentDescription = "移除自定义背景",
+                            tint = TextSecondary
+                        )
+                    }
+                }
+            }
+            Button(
+                onClick = onPickMedia,
+                modifier = Modifier.fillMaxWidth().padding(top = 14.dp).heightIn(min = 48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Green500)
+            ) {
+                Text(if (media == null) "从相册选择" else "更换照片或视频")
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComponentVisibilityRow(
+    component: PlayerComponent,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .clickable { onCheckedChange(!checked) },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            component.label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextPrimary,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f).padding(end = 12.dp)
+        )
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.White,
+                checkedTrackColor = Green500
+            )
+        )
     }
 }
 
@@ -909,7 +1331,7 @@ private fun ProgressBar(
     }
     var trackWidthPx by remember { mutableFloatStateOf(1f) }
     val enabled = duration > 0
-    val activeColor = if (enabled) Green500 else TextTertiary
+    val activeColor = if (enabled) Color.White else TextTertiary
 
     fun progressFromX(x: Float): Float {
         return (x / trackWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)

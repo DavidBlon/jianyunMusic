@@ -49,7 +49,12 @@ fun SearchScreen(
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize().background(DarkBg)) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(DarkBg)
+            .statusBarsPadding()
+    ) {
         SearchInput(
             query = query,
             onQueryChange = { query = it },

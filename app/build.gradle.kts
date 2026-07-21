@@ -1,11 +1,13 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-import java.io.FileInputStream
-import java.util.Properties
+
 
 val keystorePropertiesFile = rootProject.file("app/keystore.properties")
 val keystoreProperties = Properties()
@@ -21,8 +23,8 @@ android {
         applicationId = "com.ncm.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 6
-        versionName = "1.2.3"
+        versionCode = 7
+        versionName = "1.2.4"
 
         buildConfigField("String", "API_BASE_URL", "\"https://music.163.com/\"")
     }
@@ -97,6 +99,7 @@ dependencies {
     implementation("androidx.media3:media3-datasource:1.4.1")
     implementation("androidx.media3:media3-datasource-okhttp:1.4.1")
     implementation("androidx.media3:media3-session:1.4.1")
+    implementation("androidx.media3:media3-ui:1.4.1")
 
     // Gson
     implementation("com.google.code.gson:gson:2.11.0")
@@ -111,4 +114,3 @@ dependencies {
     // Unit tests
     testImplementation("junit:junit:4.13.2")
 }
-
