@@ -1,6 +1,6 @@
 # NeteaseCloudMusicForMe
 
-一个基于 **Kotlin + Jetpack Compose** 的第三方网易云音乐 Android 客户端，支持发现、搜索、歌单、登录、播放、歌词、喜欢歌曲同步，以及官方音源不可用时的备用音源播放。
+一个基于 **Kotlin + Jetpack Compose** 的第三方网易云音乐 Android 客户端，支持发现、搜索、歌单、登录、播放、歌词、喜欢歌曲同步，以及官方音源不可用时的备用音源播放。简云音乐官网：https://music.deltabound.top/
 
 ## 当前重点
 
