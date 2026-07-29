@@ -57,8 +57,8 @@ import com.ncm.app.ui.theme.TextSecondary
 import com.ncm.app.ui.theme.TextTertiary
 import kotlinx.coroutines.delay
 
-private const val MUSIC_SOURCE_SHOP_URL = "https://shop.shiqianjiang.cn/"
-private const val DEFAULT_COUPON_CODE = "JY-WX48RPA3"
+private const val MUSIC_SOURCE_SHOP_URL = "https://sumnera.shop.shiqianjiang.cn/"
+private const val DEFAULT_COUPON_CODE = "SUMNERA-8JDAZH9G"
 
 @Composable
 fun FirstUseMusicSourcePrompt(
