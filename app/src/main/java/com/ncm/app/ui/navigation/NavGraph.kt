@@ -11,7 +11,9 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.ncm.app.ui.screens.discover.DiscoverScreen
+import com.ncm.app.ui.screens.artist.ArtistDetailScreen
 import com.ncm.app.ui.screens.login.LoginScreen
+import com.ncm.app.ui.screens.legal.DisclaimerScreen
 import com.ncm.app.ui.screens.my.MyScreen
 import com.ncm.app.ui.screens.playlist.PlaylistDetailScreen
 import com.ncm.app.ui.screens.quick.QuickListScreen
@@ -27,10 +29,13 @@ object Routes {
     const val MY = "my"
     const val LOGIN = "login"
     const val QUICK_LIST = "quick/{type}"
+    const val ARTIST_DETAIL = "artist/{artistId}"
+    const val DISCLAIMER = "disclaimer"
 
     fun playlistDetail(id: Long) = "playlist/$id"
     fun player(songId: Long) = "player/$songId"
     fun quick(type: String) = "quick/$type"
+    fun artistDetail(id: Long) = "artist/$id"
 }
 
 @Composable
@@ -97,6 +102,25 @@ fun NavGraph(
         }
 
         composable(
+            route = Routes.ARTIST_DETAIL,
+            arguments = listOf(navArgument("artistId") { type = NavType.LongType })
+        ) { backStackEntry ->
+            val artistId = backStackEntry.arguments?.getLong("artistId") ?: return@composable
+            ArtistDetailScreen(
+                artistId = artistId,
+                onBack = { navController.popBackStack() },
+                onSongClick = { songId ->
+                    mainViewModel.artistDetailState.value.artist?.hotSongs.orEmpty().let { songs ->
+                        val startIndex = songs.indexOfFirst { it.id == songId }.coerceAtLeast(0)
+                        playerViewModel.setQueue(songs, startIndex)
+                    }
+                    onOpenPlayer(songId)
+                },
+                viewModel = mainViewModel
+            )
+        }
+
+        composable(
             route = Routes.PLAYER,
             arguments = listOf(navArgument("songId") { type = NavType.LongType }),
             enterTransition = { fadeIn(animationSpec = tween(250)) },
@@ -118,6 +142,9 @@ fun NavGraph(
                     }
                     onOpenPlayer(id)
                 },
+                onArtistClick = { artistId ->
+                    navController.navigate(Routes.artistDetail(artistId))
+                },
                 onPlayNext = { song -> playerViewModel.enqueueNext(song) },
                 viewModel = mainViewModel
             )
@@ -130,8 +157,16 @@ fun NavGraph(
                 onLogout = {
                     mainViewModel.logout()
                 },
+                onDisclaimerClick = {
+                    navController.navigate(Routes.DISCLAIMER)
+                },
+                playerViewModel = playerViewModel,
                 viewModel = mainViewModel
             )
+        }
+
+        composable(Routes.DISCLAIMER) {
+            DisclaimerScreen(onBack = { navController.popBackStack() })
         }
 
         composable(Routes.LOGIN) {

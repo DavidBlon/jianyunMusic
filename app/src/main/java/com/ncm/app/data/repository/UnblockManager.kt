@@ -1,15 +1,24 @@
 package com.ncm.app.data.repository
 
 import com.google.gson.JsonParser
+import com.ncm.app.BuildConfig
+import com.ncm.app.data.MusicSourceSettings
 import com.ncm.app.data.model.ArtistBrief
-import kotlinx.coroutines.Dispatchers
+import com.ncm.app.data.model.PlaybackSource
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.withContext
-import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import java.io.IOException
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * 本地替代音源管理器
@@ -17,13 +26,29 @@ import java.util.concurrent.TimeUnit
  * 不依赖外部代理服务器，直接在 Android 本地查询其他平台（如酷狗）
  * 为版权受限的网易云歌曲寻找可播放的替代音源
  */
-class UnblockManager {
+class UnblockManager(
+    private val musicSourceSettings: MusicSourceSettings
+) {
+
+    private companion object {
+        private const val PROVIDER_TIMEOUT_MS = 5_000L
+        private const val PROVIDER_HTTP_TIMEOUT_MS = 4_500L
+        private const val PROVIDER_FAILURE_THRESHOLD = 2
+        private const val PROVIDER_OPEN_DURATION_MS = 60_000L
+    }
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
+        .callTimeout(PROVIDER_HTTP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         .build()
+    private val linglanClient = client.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
+    private val linglanCircuitBreaker = providerCircuitBreaker()
+    private val kugouCircuitBreaker = providerCircuitBreaker()
 
     data class SongInfo(
         val id: Long = 0,
@@ -39,45 +64,75 @@ class UnblockManager {
         val bitrate: Int = 320000
     )
 
-    suspend fun unblock(info: SongInfo): MatchResult? {
-        tryProvider { huibqWy(info) }?.let { return it }
-        tryProvider { ikunWy(info) }?.let { return it }
-        tryProvider { kugouSearchAndTrack(info)?.let { url -> MatchResult(url, "kugou", 320000) } }
-            ?.let { return it }
-        return null
+    suspend fun unblock(
+        info: SongInfo,
+        excludedSources: Set<String> = emptySet()
+    ): MatchResult? = BackupSourceStrategy.resolve(
+        exactProviders = if (
+            musicSourceSettings.cardKey.value.isNotBlank() &&
+            PlaybackSource.LINGLAN !in excludedSources
+        ) {
+            listOf(
+                {
+                    linglanCircuitBreaker.executeAttempt {
+                        attemptProvider { linglanWy(info) }
+                    }
+                }
+            )
+        } else {
+            emptyList()
+        },
+        searchProviders = if (PlaybackSource.KUGOU !in excludedSources) {
+            listOf({ attemptKugou(info) })
+        } else {
+            emptyList()
+        }
+    )
+
+    /** Dedicated free-provider path used by queue prefetching. */
+    suspend fun kugouOnly(info: SongInfo): MatchResult? {
+        return attemptKugou(info)
     }
 
-    private suspend fun tryProvider(block: suspend () -> MatchResult?): MatchResult? {
-        return try {
-            withTimeoutOrNull(5_000) { block() }
-        } catch (_: Exception) {
-            null
+    private suspend fun attemptKugou(info: SongInfo): MatchResult? {
+        return kugouCircuitBreaker.executeAttempt {
+            attemptProvider {
+                kugouSearchAndTrack(info)?.let { url ->
+                    MatchResult(url, PlaybackSource.KUGOU, 320000)
+                }
+            }
         }
     }
 
-    private suspend fun huibqWy(info: SongInfo): MatchResult? {
-        if (info.id <= 0) return null
-        val quality = info.quality.takeIf { it == "128k" || it == "320k" } ?: "320k"
-        val url = "https://lxmusicapi.onrender.com/url/wy/${info.id}/$quality"
-        val body = httpGet(
-            url,
-            mapOf(
-                "Content-Type" to "application/json",
-                "User-Agent" to "lx-music-mobile/ncm-app",
-                "X-Request-Key" to "share-v3"
-            )
-        )
-        val json = JsonParser.parseString(body).asJsonObject
-        if ((json.get("code")?.asInt ?: -1) != 0) return null
-        val playUrl = json.get("url")?.asString?.takeIf { it.isNotBlank() } ?: return null
-        if (!hasEnoughAudioData(playUrl, info.duration)) return null
-        return MatchResult(playUrl, "huibq-wy", qualityToBitrate(quality))
+    private fun providerCircuitBreaker() = ProviderCircuitBreaker(
+        failureThreshold = PROVIDER_FAILURE_THRESHOLD,
+        openDurationMs = PROVIDER_OPEN_DURATION_MS
+    )
+
+    private suspend fun attemptProvider(
+        block: suspend () -> MatchResult?
+    ): ProviderAttempt<MatchResult> {
+        return try {
+            withTimeoutOrNull(PROVIDER_TIMEOUT_MS) {
+                block()?.let { ProviderAttempt.Success(it) } ?: ProviderAttempt.Miss
+            } ?: ProviderAttempt.Failure
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            ProviderAttempt.Failure
+        }
     }
 
-    private suspend fun ikunWy(info: SongInfo): MatchResult? {
+    private suspend fun linglanWy(info: SongInfo): MatchResult? {
         if (info.id <= 0) return null
+        val apiUrl = BuildConfig.PAID_MUSIC_API_URL.trim().trimEnd('/')
+        val apiKey = musicSourceSettings.cardKey.value.trim()
+        if (apiUrl.isBlank() || apiKey.isBlank()) return null
+
         val quality = info.quality.takeIf { it == "128k" || it == "320k" } ?: "320k"
-        val url = "https://api.ikunshare.com/url".toHttpUrl().newBuilder()
+        val baseUrl = apiUrl.toHttpUrlOrNull()?.takeIf { it.isHttps } ?: return null
+        val url = baseUrl.newBuilder()
+            .addPathSegment("url")
             .addQueryParameter("source", "wy")
             .addQueryParameter("songId", info.id.toString())
             .addQueryParameter("quality", quality)
@@ -87,15 +142,16 @@ class UnblockManager {
             url,
             mapOf(
                 "Content-Type" to "application/json",
-                "User-Agent" to "lx-music-mobile/ncm-app",
-                "X-Request-Key" to ""
-            )
+                "User-Agent" to "lx-music-android/${BuildConfig.VERSION_NAME}",
+                "X-API-Key" to apiKey
+            ),
+            httpClient = linglanClient
         )
         val json = JsonParser.parseString(body).asJsonObject
         if ((json.get("code")?.asInt ?: -1) != 200) return null
         val playUrl = json.get("url")?.asString?.takeIf { it.isNotBlank() } ?: return null
         if (!hasEnoughAudioData(playUrl, info.duration)) return null
-        return MatchResult(playUrl, "ikun-wy", qualityToBitrate(quality))
+        return MatchResult(playUrl, PlaybackSource.LINGLAN, qualityToBitrate(quality))
     }
 
     // ==================== 酷狗音乐 ====================
@@ -175,24 +231,65 @@ class UnblockManager {
         return contentLength >= minimumExpectedBytes
     }
 
-    private suspend fun httpContentLength(url: String): Long? = withContext(Dispatchers.IO) {
+    private suspend fun httpContentLength(url: String): Long? {
         val request = Request.Builder()
             .url(url)
             .head()
             .build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return@withContext null
-            response.header("Content-Length")?.toLongOrNull()
+        return execute(request) { response ->
+            if (response.isSuccessful) {
+                response.header("Content-Length")?.toLongOrNull()
+            } else {
+                null
+            }
         }
     }
 
-    private suspend fun httpGet(url: String, headers: Map<String, String> = emptyMap()): String = withContext(Dispatchers.IO) {
+    private suspend fun httpGet(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        httpClient: OkHttpClient = client
+    ): String {
         val requestBuilder = Request.Builder().url(url).get()
         headers.forEach { (name, value) -> requestBuilder.header(name, value) }
         val request = requestBuilder.build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw Exception("HTTP ${response.code}: ${response.message}")
-            response.body?.string() ?: throw Exception("Empty body")
+        return execute(request, httpClient) { response ->
+            if (!response.isSuccessful) {
+                throw IOException("HTTP ${response.code}: ${response.message}")
+            }
+            response.body?.string() ?: throw IOException("Empty body")
         }
+    }
+
+    private suspend fun <T> execute(
+        request: Request,
+        httpClient: OkHttpClient = client,
+        transform: (Response) -> T
+    ): T = suspendCancellableCoroutine { continuation ->
+        val call = httpClient.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(
+            object : Callback {
+                override fun onFailure(call: Call, error: IOException) {
+                    if (continuation.isActive) {
+                        continuation.resumeWithException(error)
+                    }
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    response.use {
+                        if (!continuation.isActive) return
+                        try {
+                            val result = transform(response)
+                            if (continuation.isActive) continuation.resume(result)
+                        } catch (error: Exception) {
+                            if (continuation.isActive) {
+                                continuation.resumeWithException(error)
+                            }
+                        }
+                    }
+                }
+            }
+        )
     }
 }

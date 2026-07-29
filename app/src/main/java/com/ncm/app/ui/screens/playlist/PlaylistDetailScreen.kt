@@ -64,11 +64,10 @@ fun PlaylistDetailScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(DarkBg)
     ) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 92.dp)
+            contentPadding = PaddingValues(bottom = miniPlayerSafeBottomPadding())
         ) {
             item {
                 PlaylistHeader(
@@ -98,8 +97,10 @@ fun PlaylistDetailScreen(
                         onClick = { visibleSongs.firstOrNull()?.let { onSongClick(it.id) } },
                         enabled = visibleSongs.isNotEmpty(),
                         shape = RoundedCornerShape(20.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Green500),
-                        modifier = Modifier.weight(1f)
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                        modifier = Modifier
+                            .weight(1f)
+                            .accentSurface(RoundedCornerShape(20.dp))
                     ) {
                         Icon(
                             imageVector = androidx.compose.material.icons.Icons.Filled.PlayArrow,

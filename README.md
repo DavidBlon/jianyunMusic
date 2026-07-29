@@ -5,7 +5,7 @@
 ## 当前重点
 
 - Android 端主路径通过 Kotlin 网络层直接访问所需接口，不需要 Node.js 或本地代理服务。
-- 播放优先使用网易云官方音源，官方地址不可读或加载失败时再尝试备用音源。
+- 播放优先使用网易云官方音源，官方地址不可读或加载失败时依次尝试聆澜音源和酷狗搜索兜底。
 - 登录支持网页登录 Cookie 同步和二维码登录，播放请求会携带 Cookie、Referer、Origin 和网易云桌面 UA。
 - 已加入 JVM 单元测试、Android Lint 配置和 GitHub Actions CI，避免只靠人工回归。
 
@@ -43,6 +43,8 @@
 ```powershell
 .\gradlew.bat --no-daemon assembleDebug
 ```
+
+聆澜音源的服务地址默认使用 `https://source.shiqianjiang.cn/api/music`，也可以通过 `paidMusicApiUrl`、`PAID_MUSIC_API_URL` 或根目录唯一一份 `lx-music-source-paid-*.js` 中的 `API_URL` 覆盖。卡密不再编译进 APK，由用户在首次启动引导或设置页面中输入并经服务端验证后保存。
 
 如果本机没有全局 JDK，可临时设置自己的 JDK 17 路径，例如：
 

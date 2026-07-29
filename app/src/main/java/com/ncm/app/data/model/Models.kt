@@ -63,11 +63,38 @@ data class ArtistBrief(
     val name: String
 )
 
+data class ArtistDetail(
+    val id: Long,
+    val name: String,
+    val avatarUrl: String? = null,
+    val aliases: List<String> = emptyList(),
+    val briefDescription: String = "",
+    val fullDescription: String = "",
+    val musicCount: Int = 0,
+    val albumCount: Int = 0,
+    val mvCount: Int = 0,
+    val hotSongs: List<Song> = emptyList()
+)
+
 data class AlbumBrief(
     val id: Long,
     val name: String,
     val picUrl: String? = null
 )
+
+internal fun Song.withArtworkFrom(detail: Song?): Song {
+    if (!album?.picUrl.isNullOrBlank() || detail?.id != id) return this
+
+    val detailAlbum = detail.album ?: return this
+    val artworkUrl = detailAlbum.picUrl?.takeIf { it.isNotBlank() } ?: return this
+    val mergedAlbum = album?.copy(
+        id = album.id.takeIf { it > 0 } ?: detailAlbum.id,
+        name = album.name.ifBlank { detailAlbum.name },
+        picUrl = artworkUrl
+    ) ?: detailAlbum
+
+    return copy(album = mergedAlbum)
+}
 
 data class SongUrlResponse(
     val url: String? = null,

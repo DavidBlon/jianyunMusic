@@ -7,11 +7,13 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import com.ncm.app.NeteaseApp
+import com.ncm.app.data.cache.LinglanCachePolicy
+import com.ncm.app.data.model.PlaybackSource
 import com.ncm.app.data.model.Song
+import com.ncm.app.data.model.SongUrlResponse
+import com.ncm.app.data.model.withArtworkFrom
 import com.ncm.app.playback.AppPlayer
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,7 +22,7 @@ import kotlinx.coroutines.launch
 data class PlayerUiState(
     val currentSong: Song? = null,
     val songUrl: String? = null,
-    val audioSource: String = "netease",
+    val audioSource: String = PlaybackSource.NETEASE,
     val lyric: String? = null,
     val tlyric: String? = null,
     val isPlaying: Boolean = false,
@@ -35,7 +37,16 @@ data class PlayerUiState(
     val queue: List<Song> = emptyList(),
     val history: List<Song> = emptyList(),
     val sleepRemainingSeconds: Int? = null,
+    val linglanCache: LinglanCacheUiState = LinglanCacheUiState(),
     val error: String? = null
+)
+
+data class LinglanCacheUiState(
+    val songCount: Int = 0,
+    val sizeBytes: Long = 0,
+    val isLoading: Boolean = false,
+    val isClearing: Boolean = false,
+    val message: String? = null
 )
 
 enum class PlayMode {
@@ -54,7 +65,6 @@ class PlayerViewModel : ViewModel() {
     private companion object {
         private const val TAG = "PlayerViewModel"
         private const val PREPARED_QUEUE_WINDOW = 3
-        private const val SONG_URL_CACHE_LIMIT = 80
         private const val PLAY_REQUEST_DEBOUNCE_MS = 180L
         private const val QUEUE_PREFETCH_START_DELAY_MS = 700L
         private const val QUEUE_PREFETCH_REQUEST_DELAY_MS = 300L
@@ -64,15 +74,11 @@ class PlayerViewModel : ViewModel() {
         private const val HISTORY_LIMIT = 100
     }
 
-    private data class UrlCacheKey(
-        val songId: Long,
-        val bitrate: Int
-    )
-
     private data class PreparedQueueItem(
         val song: Song,
         val url: String,
-        val source: String
+        val source: String,
+        val cacheKey: String? = null
     )
 
     private val app = NeteaseApp.instance
@@ -92,12 +98,6 @@ class PlayerViewModel : ViewModel() {
     private var queuePrefetchAnchorSongId: Long? = null
     private var transientBackupSongId: Long? = null
     private val preparedQueueItems = mutableMapOf<Long, PreparedQueueItem>()
-    private val pendingSongUrlRequests = mutableMapOf<UrlCacheKey, Deferred<Result<PreparedQueueItem?>>>()
-    private val songUrlCache = object : LinkedHashMap<UrlCacheKey, PreparedQueueItem>(32, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<UrlCacheKey, PreparedQueueItem>?): Boolean {
-            return size > SONG_URL_CACHE_LIMIT
-        }
-    }
 
     private val player = AppPlayer.player(app)
 
@@ -146,7 +146,8 @@ class PlayerViewModel : ViewModel() {
                     PreparedQueueItem(
                         song,
                         mediaItem.localConfiguration?.uri.toString(),
-                        AppPlayer.sourceFor(mediaItem) ?: "netease"
+                        AppPlayer.sourceFor(mediaItem) ?: PlaybackSource.NETEASE,
+                        AppPlayer.cacheKeyFor(mediaItem)
                     )
                 }
                 ?: return
@@ -182,14 +183,18 @@ class PlayerViewModel : ViewModel() {
         override fun onPlayerError(error: PlaybackException) {
             Log.e(TAG, "playerError ${error.errorCodeName}", error)
             val song = _state.value.currentSong
-            if (song != null && _state.value.audioSource == "netease") {
-                switchToBackupSource(song.id, ++playRequestToken, "播放失败，正在切换备用音源")
-            } else {
-                _state.value = _state.value.copy(
-                    isLoading = false,
-                    isPlaying = false,
-                    error = "播放失败：${error.errorCodeName}"
-                )
+            when {
+                song == null -> showPlaybackError(error)
+                _state.value.audioSource == PlaybackSource.NETEASE -> {
+                    switchToBackupSource(
+                        songId = song.id,
+                        requestToken = ++playRequestToken,
+                        message = "播放失败，正在尝试聆澜音源"
+                    )
+                }
+                PlaybackSource.isLinglan(_state.value.audioSource) ->
+                    evictLinglanAndSwitchToKugou(song, ++playRequestToken)
+                else -> showPlaybackError(error)
             }
         }
     }
@@ -199,6 +204,7 @@ class PlayerViewModel : ViewModel() {
         player.addListener(playerListener)
         _state.value = _state.value.copy(history = loadHistory())
         restoreFromActivePlayer()
+        refreshLinglanCacheStats()
     }
 
     fun play(songId: Long) {
@@ -421,12 +427,11 @@ class PlayerViewModel : ViewModel() {
             return
         }
 
-        viewModelScope.launch {
+        val requestToken = ++playRequestToken
+        playRequestJob?.cancel()
+        playRequestJob = viewModelScope.launch {
             val resumePosition = player.currentPosition.coerceAtLeast(0)
-            val requestToken = playRequestToken
             preparedQueueItems.clear()
-            songUrlCache.clear()
-            pendingSongUrlRequests.clear()
             _state.value = _state.value.copy(quality = quality, isLoading = true, error = null)
             repo.getSongUrlWithFallbackTimeout(songId, quality.bitrate, currentSong.fee).onSuccess { urlResp ->
                 if (!isCurrentSongRequest(requestToken, songId)) return@onSuccess
@@ -443,7 +448,16 @@ class PlayerViewModel : ViewModel() {
                         )
                     }
                 } else {
-                    currentSong?.let { startPlayback(it, url, resumePosition, urlResp.source) }
+                    currentSong?.let { song ->
+                        val prepared = preparedFromResponse(song, urlResp) ?: return@let
+                        startPlayback(
+                            song = prepared.song,
+                            url = prepared.url,
+                            startPosition = resumePosition,
+                            source = prepared.source,
+                            cacheKey = prepared.cacheKey
+                        )
+                    }
                 }
             }.onFailure { e ->
                 if (!isCurrentSongRequest(requestToken, songId)) return@onFailure
@@ -498,24 +512,150 @@ class PlayerViewModel : ViewModel() {
         }
     }
 
+    fun refreshLinglanCacheStats() {
+        val cacheState = _state.value.linglanCache
+        if (cacheState.isLoading || cacheState.isClearing) return
+        _state.value = _state.value.copy(
+            linglanCache = cacheState.copy(isLoading = true)
+        )
+        viewModelScope.launch {
+            runCatching { app.linglanAudioCache.stats() }
+                .onSuccess { stats ->
+                    _state.value = _state.value.copy(
+                        linglanCache = _state.value.linglanCache.copy(
+                            songCount = stats.songCount,
+                            sizeBytes = stats.sizeBytes,
+                            isLoading = false
+                        )
+                    )
+                }
+                .onFailure { error ->
+                    _state.value = _state.value.copy(
+                        linglanCache = _state.value.linglanCache.copy(
+                            isLoading = false,
+                            message = error.message ?: "无法读取聆澜缓存"
+                        )
+                    )
+                }
+        }
+    }
+
+    fun clearLinglanCache() {
+        val cacheState = _state.value.linglanCache
+        if (cacheState.isClearing) return
+        _state.value = _state.value.copy(
+            linglanCache = cacheState.copy(isClearing = true, message = null)
+        )
+        viewModelScope.launch {
+            playRequestJob?.cancel()
+            playRequestJob = null
+            playRequestToken++
+            queuePrefetchJob?.cancel()
+            queuePrefetchJob = null
+            queuePrefetchAnchorSongId = null
+
+            val currentState = _state.value
+            val currentSong = currentState.currentSong
+            val currentUrl = currentState.songUrl
+            val currentSource = currentState.audioSource
+            val wasPlaying = player.isPlaying
+            val resumePosition = player.currentPosition.coerceAtLeast(0)
+            app.linglanAudioCache.cancelPendingWrites()
+
+            if (
+                currentSong != null &&
+                currentSource == PlaybackSource.LINGLAN &&
+                !currentUrl.isNullOrBlank()
+            ) {
+                // Release CacheDataSource first, then continue the already obtained URL directly.
+                // This prevents the active stream from immediately writing the cleared entry back.
+                player.pause()
+                player.setMediaItem(
+                    AppPlayer.mediaItem(
+                        song = currentSong,
+                        url = currentUrl,
+                        source = currentSource,
+                        cacheKey = null
+                    ),
+                    resumePosition
+                )
+                player.prepare()
+                player.playWhenReady = wasPlaying
+                AppPlayer.updateCurrentPlayback(currentSong, currentSource)
+            } else if (
+                currentSong != null &&
+                currentSource == PlaybackSource.LINGLAN_CACHE
+            ) {
+                // A cache-only item has no valid upstream URL after deletion. Stop it without
+                // silently spending another paid-source request; the user can explicitly replay.
+                player.pause()
+                player.stop()
+                player.clearMediaItems()
+                AppPlayer.stopPlaybackService(app)
+                _state.value = _state.value.copy(
+                    songUrl = null,
+                    audioSource = PlaybackSource.NETEASE,
+                    isPlaying = false,
+                    isLoading = false,
+                    currentPosition = 0,
+                    progress = 0f,
+                    error = "聆澜缓存已清空，点击播放可重新获取当前歌曲"
+                )
+            }
+
+            // Give Media3's old CacheDataSource a frame to close its cache span before deletion.
+            delay(120)
+            removeLinglanItemsFromPreparedQueue()
+            val result = runCatching { app.linglanAudioCache.clear() }
+            result.onSuccess { stats ->
+                _state.value = _state.value.copy(
+                    linglanCache = _state.value.linglanCache.copy(
+                        songCount = stats.songCount,
+                        sizeBytes = stats.sizeBytes,
+                        isClearing = false,
+                        isLoading = false,
+                        message = "聆澜缓存已清空"
+                    )
+                )
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    linglanCache = _state.value.linglanCache.copy(
+                        isClearing = false,
+                        isLoading = false,
+                        message = error.message ?: "清空聆澜缓存失败"
+                    )
+                )
+            }
+        }
+    }
+
     private fun scheduleBufferingFallback() {
         val song = _state.value.currentSong ?: return
-        if (_state.value.audioSource != "netease") return
+        if (_state.value.audioSource != PlaybackSource.NETEASE) return
         val requestToken = playRequestToken
         bufferingFallbackJob?.cancel()
         bufferingFallbackJob = viewModelScope.launch {
             delay(BUFFERING_FALLBACK_TIMEOUT_MS)
             if (!isCurrentSongRequest(requestToken, song.id)) return@launch
             if (player.playbackState != Player.STATE_BUFFERING) return@launch
-            switchToBackupSource(song.id, requestToken, "网易云音源加载超时，正在切换备用音源")
+            switchToBackupSource(song.id, requestToken, "网易云音源加载超时，正在尝试聆澜音源")
         }
     }
 
-    private fun switchToBackupSource(songId: Long, requestToken: Long, message: String) {
+    private fun switchToBackupSource(
+        songId: Long,
+        requestToken: Long,
+        message: String,
+        excludedSources: Set<String> = emptySet()
+    ) {
         if (!isCurrentSongRequest(requestToken, songId)) return
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, error = message)
-            repo.getBackupSongUrl(songId, _state.value.quality.bitrate).onSuccess { urlResp ->
+            repo.getBackupSongUrl(
+                songId = songId,
+                br = _state.value.quality.bitrate,
+                excludedSources = excludedSources
+            ).onSuccess { urlResp ->
                 if (!isCurrentSongRequest(requestToken, songId)) return@onSuccess
                 val url = urlResp.url
                 val song = _state.value.currentSong
@@ -523,14 +663,15 @@ class PlayerViewModel : ViewModel() {
                     _state.value = _state.value.copy(
                         isLoading = false,
                         isPlaying = player.isPlaying,
-                        error = urlResp.error ?: "备用音源暂时不可用"
+                        error = urlResp.error ?: "聆澜及兜底音源暂时不可用"
                     )
                     return@onSuccess
                 }
-                val prepared = PreparedQueueItem(song, url, urlResp.source)
-            preparedQueueItems[songId] = prepared
-            transientBackupSongId = songId
-            songUrlCache.remove(UrlCacheKey(songId, _state.value.quality.bitrate))
+                val prepared = preparedFromResponse(song, urlResp) ?: return@onSuccess
+                preparedQueueItems[songId] = prepared
+                transientBackupSongId = songId.takeIf {
+                    LinglanCachePolicy.isTransientQueueSource(prepared.source)
+                }
                 progressJob?.cancel()
                 _state.value = _state.value.copy(
                     currentSong = prepared.song,
@@ -541,16 +682,49 @@ class PlayerViewModel : ViewModel() {
                     isLoading = true,
                     error = null
                 )
-                startPlayback(prepared.song, prepared.url, source = prepared.source, reuseExistingQueue = false)
+                startPlayback(
+                    song = prepared.song,
+                    url = prepared.url,
+                    source = prepared.source,
+                    cacheKey = prepared.cacheKey,
+                    reuseExistingQueue = false
+                )
             }.onFailure { e ->
                 if (!isCurrentSongRequest(requestToken, songId)) return@onFailure
                 _state.value = _state.value.copy(
                     isLoading = false,
                     isPlaying = player.isPlaying,
-                    error = e.message ?: "备用音源暂时不可用"
+                    error = e.message ?: "聆澜及兜底音源暂时不可用"
                 )
             }
         }
+    }
+
+    private fun evictLinglanAndSwitchToKugou(song: Song, requestToken: Long) {
+        viewModelScope.launch {
+            runCatching {
+                app.linglanAudioCache.remove(song.id, _state.value.quality.bitrate)
+            }
+            preparedQueueItems.remove(song.id)
+            refreshLinglanCacheStats()
+            switchToBackupSource(
+                songId = song.id,
+                requestToken = requestToken,
+                message = "聆澜音源播放失败，正在切换酷狗",
+                excludedSources = setOf(
+                    PlaybackSource.LINGLAN,
+                    PlaybackSource.LINGLAN_CACHE
+                )
+            )
+        }
+    }
+
+    private fun showPlaybackError(error: PlaybackException) {
+        _state.value = _state.value.copy(
+            isLoading = false,
+            isPlaying = false,
+            error = "播放失败：${error.errorCodeName}"
+        )
     }
 
     private fun savedQuality(): PlaybackQuality {
@@ -638,11 +812,13 @@ class PlayerViewModel : ViewModel() {
     private suspend fun playKnownSong(song: Song, requestToken: Long) {
         val songId = song.id
         if (!isActivePlayRequest(requestToken)) return
+        val playableSong = resolveSongArtwork(song)
+        if (!isActivePlayRequest(requestToken)) return
         _state.value = _state.value.copy(
-            currentSong = song,
+            currentSong = playableSong,
             songUrl = null,
             audioSource = "netease",
-            duration = song.dt,
+            duration = playableSong.dt,
             lyric = null,
             tlyric = null,
             isPlaying = false,
@@ -652,7 +828,7 @@ class PlayerViewModel : ViewModel() {
             isLikeUpdating = false
         )
         refreshLiked(songId)
-        resolvePreparedSong(song, _state.value.quality.bitrate).onSuccess { prepared ->
+        resolvePreparedSong(playableSong, _state.value.quality.bitrate).onSuccess { prepared ->
             if (!isCurrentSongRequest(requestToken, songId)) return@onSuccess
             if (prepared == null) {
                 stopUnavailable("\u8fd9\u9996\u6b4c\u5f53\u524d\u4e0d\u53ef\u64ad\u653e")
@@ -673,7 +849,14 @@ class PlayerViewModel : ViewModel() {
     private fun playPreparedSong(prepared: PreparedQueueItem, requestToken: Long) {
         if (!isActivePlayRequest(requestToken)) return
         currentIndex = playQueue.indexOfFirst { it.id == prepared.song.id }.takeIf { it >= 0 } ?: currentIndex
-        if (seekToQueuedSong(prepared.song.id, prepared.url, prepared.source)) return
+        if (
+            seekToQueuedSong(
+                songId = prepared.song.id,
+                expectedUrl = prepared.url,
+                expectedSource = prepared.source,
+                expectedCacheKey = prepared.cacheKey
+            )
+        ) return
         progressJob?.cancel()
         _state.value = _state.value.copy(
             currentSong = prepared.song,
@@ -694,6 +877,7 @@ class PlayerViewModel : ViewModel() {
             prepared.song,
             prepared.url,
             source = prepared.source,
+            cacheKey = prepared.cacheKey,
             reuseExistingQueue = playQueue.any { it.id == prepared.song.id }
         )
         loadLyric(prepared.song.id)
@@ -703,19 +887,34 @@ class PlayerViewModel : ViewModel() {
         song: Song,
         url: String,
         startPosition: Long = 0,
-        source: String = "netease",
+        source: String = PlaybackSource.NETEASE,
+        cacheKey: String? = null,
         reuseExistingQueue: Boolean = false
     ) {
         bufferingFallbackJob?.cancel()
         progressJob?.cancel()
+        transientBackupSongId = song.id.takeIf {
+            LinglanCachePolicy.isTransientQueueSource(source)
+        }
         AppPlayer.updateCurrentPlayback(song, source)
         AppPlayer.startPlaybackService(app)
         AppPlayer.refreshPlaybackNotification(app)
-        val switchedInQueue = reuseExistingQueue && switchToQueueItem(song, url, source, startPosition)
+        val switchedInQueue = reuseExistingQueue &&
+            switchToQueueItem(song, url, source, cacheKey, startPosition)
         if (!switchedInQueue) {
-            player.setMediaItems(buildPlaybackQueue(song, url, source), 0, startPosition.coerceAtLeast(0))
+            player.setMediaItems(
+                buildPlaybackQueue(song, url, source, cacheKey),
+                0,
+                startPosition.coerceAtLeast(0)
+            )
             player.prepare()
             player.playWhenReady = true
+        }
+        if (
+            source == PlaybackSource.LINGLAN &&
+            LinglanCachePolicy.isLinglanCacheKey(cacheKey)
+        ) {
+            AppPlayer.scheduleLinglanCacheFill(url, checkNotNull(cacheKey))
         }
         _state.value = _state.value.copy(songUrl = url, audioSource = source, isLoading = true, error = null)
         prefetchQueueAfter(song.id)
@@ -774,8 +973,11 @@ class PlayerViewModel : ViewModel() {
 
             for (song in songsToPrepare) {
                 if (_state.value.currentSong?.id != songId) break
-                if (preparedQueueItems.containsKey(song.id) || songUrlCache.containsKey(UrlCacheKey(song.id, bitrate))) continue
-                resolvePreparedSong(song, bitrate).onSuccess { prepared ->
+                val existing = preparedQueueItems[song.id]
+                if (existing != null && LinglanCachePolicy.isAllowedForPrefetch(existing.source)) {
+                    continue
+                }
+                resolvePreparedSongForPrefetch(song, bitrate).onSuccess { prepared ->
                     if (prepared == null) return@onSuccess
                     if (_state.value.currentSong?.id == songId) {
                         appendPreparedQueue(songId)
@@ -789,48 +991,103 @@ class PlayerViewModel : ViewModel() {
     }
 
     private suspend fun resolvePreparedSong(song: Song, bitrate: Int): Result<PreparedQueueItem?> {
-        val key = UrlCacheKey(song.id, bitrate)
-        songUrlCache[key]?.let { cached ->
-            preparedQueueItems[song.id] = cached
-            return Result.success(cached)
-        }
-        pendingSongUrlRequests[key]?.let { pending ->
-            return pending.await().also { result ->
-                result.getOrNull()?.let { prepared -> preparedQueueItems[song.id] = prepared }
-            }
-        }
-
-        val request = viewModelScope.async {
-            repo.getSongUrlWithFallbackTimeout(song.id, bitrate, song.fee).map { urlResp ->
-                val url = urlResp.url ?: return@map null
-                PreparedQueueItem(song, url, urlResp.source).also { prepared ->
-                    if (prepared.source == "netease") {
-                        songUrlCache[key] = prepared
-                    } else if (_state.value.currentSong?.id == song.id) {
-                        transientBackupSongId = song.id
-                    }
-                    preparedQueueItems[song.id] = prepared
+        val playableSong = resolveSongArtwork(song)
+        return repo.getSongUrlWithFallbackTimeout(
+            playableSong.id,
+            bitrate,
+            playableSong.fee
+        ).map { urlResp ->
+            preparedFromResponse(playableSong, urlResp)?.also { prepared ->
+                if (
+                    LinglanCachePolicy.isTransientQueueSource(prepared.source) &&
+                    _state.value.currentSong?.id == playableSong.id
+                ) {
+                    transientBackupSongId = playableSong.id
                 }
-            }
-        }
-        pendingSongUrlRequests[key] = request
-        return try {
-            request.await()
-        } finally {
-            if (pendingSongUrlRequests[key] === request) {
-                pendingSongUrlRequests.remove(key)
+                preparedQueueItems[playableSong.id] = prepared
             }
         }
     }
 
-    private fun seekToQueuedSong(songId: Long, expectedUrl: String? = null, expectedSource: String? = null): Boolean {
+    private suspend fun resolvePreparedSongForPrefetch(
+        song: Song,
+        bitrate: Int
+    ): Result<PreparedQueueItem?> {
+        val playableSong = resolveSongArtwork(song)
+        return repo.getSongUrlForPrefetch(
+            playableSong.id,
+            bitrate,
+            playableSong.fee
+        ).map { urlResp ->
+            if (!LinglanCachePolicy.isAllowedForPrefetch(urlResp.source)) {
+                null
+            } else {
+                preparedFromResponse(playableSong, urlResp)?.also { prepared ->
+                    preparedQueueItems[playableSong.id] = prepared
+                }
+            }
+        }
+    }
+
+    private fun preparedFromResponse(
+        song: Song,
+        response: SongUrlResponse
+    ): PreparedQueueItem? {
+        val url = response.url?.takeIf { it.isNotBlank() } ?: return null
+        val cacheKey = if (LinglanCachePolicy.shouldPersist(response.source)) {
+            app.linglanAudioCache.cacheKey(song.id, response.br)
+        } else {
+            null
+        }
+        return PreparedQueueItem(
+            song = song,
+            url = url,
+            source = response.source,
+            cacheKey = cacheKey
+        )
+    }
+
+    private suspend fun resolveSongArtwork(song: Song): Song {
+        if (!song.album?.picUrl.isNullOrBlank()) return song
+
+        val detail = repo.getSongDetail(listOf(song.id)).getOrNull()?.firstOrNull()
+        val enriched = song.withArtworkFrom(detail)
+        if (enriched != song) {
+            playQueue = playQueue.map { queued ->
+                if (queued.id == enriched.id) queued.withArtworkFrom(detail) else queued
+            }
+            _state.value = _state.value.copy(queue = playQueue)
+        }
+        return enriched
+    }
+
+    private fun PreparedQueueItem.withSongArtworkFrom(song: Song): PreparedQueueItem {
+        if (!this.song.album?.picUrl.isNullOrBlank()) return this
+        val artwork = song.album?.picUrl?.takeIf { it.isNotBlank() } ?: return this
+        return copy(
+            song = this.song.copy(
+                album = this.song.album?.copy(picUrl = artwork) ?: song.album
+            )
+        )
+    }
+
+    private fun seekToQueuedSong(
+        songId: Long,
+        expectedUrl: String? = null,
+        expectedSource: String? = null,
+        expectedCacheKey: String? = null
+    ): Boolean {
         if (transientBackupSongId == songId) return false
         val targetIndex = (0 until player.mediaItemCount)
             .firstOrNull { index -> player.getMediaItemAt(index).mediaId.toLongOrNull() == songId }
             ?: return false
         val targetItem = player.getMediaItemAt(targetIndex)
         if (expectedUrl != null && targetItem.localConfiguration?.uri?.toString() != expectedUrl) return false
-        if (expectedSource != null && (AppPlayer.sourceFor(targetItem) ?: "netease") != expectedSource) return false
+        if (
+            expectedSource != null &&
+            (AppPlayer.sourceFor(targetItem) ?: PlaybackSource.NETEASE) != expectedSource
+        ) return false
+        if (expectedCacheKey != null && AppPlayer.cacheKeyFor(targetItem) != expectedCacheKey) return false
 
         _state.value = _state.value.copy(isLoading = true, error = null)
         currentIndex = playQueue.indexOfFirst { it.id == songId }.takeIf { it >= 0 } ?: currentIndex
@@ -845,7 +1102,9 @@ class PlayerViewModel : ViewModel() {
     private fun clearTransientBackupIfLeaving(nextSongId: Long) {
         val backupSongId = transientBackupSongId ?: return
         if (backupSongId == nextSongId) return
-        preparedQueueItems[backupSongId]?.takeIf { it.source != "netease" }?.let {
+        preparedQueueItems[backupSongId]
+            ?.takeIf { LinglanCachePolicy.isTransientQueueSource(it.source) }
+            ?.let {
             preparedQueueItems.remove(backupSongId)
         }
         for (index in player.mediaItemCount - 1 downTo 0) {
@@ -856,7 +1115,25 @@ class PlayerViewModel : ViewModel() {
         transientBackupSongId = null
     }
 
-    private fun switchToQueueItem(song: Song, url: String, source: String, startPosition: Long): Boolean {
+    private fun removeLinglanItemsFromPreparedQueue() {
+        preparedQueueItems.entries.removeAll { (_, prepared) ->
+            LinglanCachePolicy.shouldPersist(prepared.source)
+        }
+        for (index in player.mediaItemCount - 1 downTo 0) {
+            val item = player.getMediaItemAt(index)
+            if (LinglanCachePolicy.isLinglanCacheKey(AppPlayer.cacheKeyFor(item))) {
+                player.removeMediaItem(index)
+            }
+        }
+    }
+
+    private fun switchToQueueItem(
+        song: Song,
+        url: String,
+        source: String,
+        cacheKey: String?,
+        startPosition: Long
+    ): Boolean {
         if (player.mediaItemCount == 0 || player.currentMediaItem == null) return false
         if (transientBackupSongId == song.id) return false
 
@@ -866,15 +1143,23 @@ class PlayerViewModel : ViewModel() {
         val targetIndex = existingIndex ?: run {
             val currentPlayerIndex = player.currentMediaItemIndex.takeIf { it >= 0 } ?: 0
             val insertIndex = (currentPlayerIndex + 1).coerceIn(0, player.mediaItemCount)
-            player.addMediaItem(insertIndex, AppPlayer.mediaItem(song, url, source))
+            player.addMediaItem(insertIndex, AppPlayer.mediaItem(song, url, source, cacheKey))
             insertIndex
         }
         existingIndex?.let { index ->
             val existingItem = player.getMediaItemAt(index)
             val existingUrl = existingItem.localConfiguration?.uri?.toString()
-            val existingSource = AppPlayer.sourceFor(existingItem) ?: "netease"
-            if (existingUrl != requestedUrl || existingSource != source) {
-                player.replaceMediaItem(index, AppPlayer.mediaItem(song, requestedUrl, source))
+            val existingSource = AppPlayer.sourceFor(existingItem) ?: PlaybackSource.NETEASE
+            val existingCacheKey = AppPlayer.cacheKeyFor(existingItem)
+            if (
+                existingUrl != requestedUrl ||
+                existingSource != source ||
+                existingCacheKey != cacheKey
+            ) {
+                player.replaceMediaItem(
+                    index,
+                    AppPlayer.mediaItem(song, requestedUrl, source, cacheKey)
+                )
             }
         }
 
@@ -886,8 +1171,13 @@ class PlayerViewModel : ViewModel() {
         return true
     }
 
-    private fun buildPlaybackQueue(song: Song, url: String, source: String): List<MediaItem> {
-        val mediaItems = mutableListOf(AppPlayer.mediaItem(song, url, source))
+    private fun buildPlaybackQueue(
+        song: Song,
+        url: String,
+        source: String,
+        cacheKey: String?
+    ): List<MediaItem> {
+        val mediaItems = mutableListOf(AppPlayer.mediaItem(song, url, source, cacheKey))
         if (playQueue.isEmpty()) return mediaItems
 
         PlaybackQueuePlanner.windowAfter(
@@ -898,7 +1188,16 @@ class PlayerViewModel : ViewModel() {
         )
             .mapNotNull { nextSong ->
                 preparedQueueItems[nextSong.id]?.let { prepared ->
-                    AppPlayer.mediaItem(prepared.song, prepared.url, prepared.source)
+                    prepared
+                        .takeIf { LinglanCachePolicy.isAllowedForPrefetch(it.source) }
+                        ?.let {
+                            AppPlayer.mediaItem(
+                                it.song,
+                                it.url,
+                                it.source,
+                                it.cacheKey
+                            )
+                        }
                 }
             }
             .forEach(mediaItems::add)
@@ -919,7 +1218,16 @@ class PlayerViewModel : ViewModel() {
             .filter { it.id !in existingIds }
             .mapNotNull { song ->
                 preparedQueueItems[song.id]?.let { prepared ->
-                    AppPlayer.mediaItem(prepared.song, prepared.url, prepared.source)
+                    prepared
+                        .takeIf { LinglanCachePolicy.isAllowedForPrefetch(it.source) }
+                        ?.let {
+                            AppPlayer.mediaItem(
+                                it.song,
+                                it.url,
+                                it.source,
+                                it.cacheKey
+                            )
+                        }
                 }
             }
             .forEach { mediaItem ->

@@ -6,8 +6,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.BasicText
 import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.*
@@ -15,12 +17,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ncm.app.data.model.Song
+import com.ncm.app.ui.components.LinglanSourceBadge
+import com.ncm.app.ui.components.ArtistLinks
 import com.ncm.app.ui.theme.*
 import com.ncm.app.viewmodel.MainViewModel
 import kotlinx.coroutines.delay
@@ -28,6 +33,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun SearchScreen(
     onSongClick: (Long) -> Unit,
+    onArtistClick: (Long) -> Unit,
     onPlayNext: (Song) -> Unit,
     viewModel: MainViewModel = viewModel()
 ) {
@@ -52,7 +58,6 @@ fun SearchScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(DarkBg)
             .statusBarsPadding()
     ) {
         SearchInput(
@@ -76,7 +81,10 @@ fun SearchScreen(
                     .filter { it.contains(query.trim(), ignoreCase = true) && !it.equals(query.trim(), ignoreCase = true) }
                     .take(4)
             }
-            LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 92.dp)) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = miniPlayerSafeBottomPadding())
+            ) {
                 if (suggestions.isNotEmpty()) {
                     item { SearchSuggestions(suggestions) { term -> query = term; viewModel.submitSearch(term) } }
                 }
@@ -101,7 +109,9 @@ fun SearchScreen(
                     SearchSongItem(
                         song = song,
                         showPlayNext = state.isCommitted,
+                        showLinglanSource = state.isLinglanConfigured && song.fee != 0,
                         onClick = { onSongClick(song.id) },
+                        onArtistClick = onArtistClick,
                         onPlayNext = { onPlayNext(song) }
                     )
                 }
@@ -118,20 +128,43 @@ private fun SearchInput(
     onClear: () -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 8.dp)
-            .background(DarkBg3, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 20.dp, end = 20.dp, top = 8.dp)
+            .glassSurface(RoundedCornerShape(10.dp), elevation = 8.dp)
+            .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(androidx.compose.material.icons.Icons.Outlined.Search, null, tint = TextTertiary, modifier = Modifier.size(18.dp))
         Spacer(modifier = Modifier.width(8.dp))
-        TextField(
+        BasicTextField(
             value = query,
             onValueChange = onQueryChange,
-            placeholder = { Text("搜索歌曲、歌手、专辑", style = MaterialTheme.typography.bodyMedium, color = TextTertiary) },
-            modifier = Modifier.weight(1f), singleLine = true,
-            colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, cursorColor = Green500, focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary),
+            modifier = Modifier
+                .weight(1f)
+                .heightIn(min = 56.dp),
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary),
+            cursorBrush = SolidColor(Green500),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { onSearch() })
+            keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+            decorationBox = { innerTextField ->
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    if (query.isEmpty()) {
+                        BasicText(
+                            text = "搜索歌曲、歌手、专辑",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                color = TextTertiary,
+                                background = Color.Unspecified
+                            )
+                        )
+                    }
+                    innerTextField()
+                }
+            }
         )
         if (query.isNotBlank()) {
             TextButton(onClick = onClear, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
@@ -149,7 +182,15 @@ private fun SearchLanding(
     onClearHistory: () -> Unit
 ) {
     val uniqueHistory = history.distinctBy { it.lowercase() }
-    LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp)) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(
+            start = 20.dp,
+            top = 18.dp,
+            end = 20.dp,
+            bottom = miniPlayerSafeBottomPadding()
+        )
+    ) {
         if (uniqueHistory.isNotEmpty()) {
             item {
                 Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -179,11 +220,37 @@ private fun SearchSuggestions(suggestions: List<String>, onClick: (String) -> Un
 }
 
 @Composable
-private fun SearchSongItem(song: Song, showPlayNext: Boolean, onClick: () -> Unit, onPlayNext: () -> Unit) {
+private fun SearchSongItem(
+    song: Song,
+    showPlayNext: Boolean,
+    showLinglanSource: Boolean,
+    onClick: () -> Unit,
+    onArtistClick: (Long) -> Unit,
+    onPlayNext: () -> Unit
+) {
     Row(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(modifier = Modifier.weight(1f)) {
             Text(song.name, style = MaterialTheme.typography.titleMedium, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("${song.artistText} - ${song.album?.name ?: ""}", style = MaterialTheme.typography.bodySmall, color = TextTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+            Row(
+                modifier = Modifier.padding(top = 3.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (showLinglanSource) {
+                    LinglanSourceBadge()
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+                ArtistLinks(
+                    artists = song.artists,
+                    onArtistClick = onArtistClick,
+                    suffix = song.album?.name
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { " - $it" }
+                        .orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextTertiary,
+                    modifier = Modifier.weight(1f)
+                )
+            }
         }
         if (showPlayNext) IconButton(onClick = onPlayNext) { Text("+", color = Green500, fontSize = 26.sp) }
         Icon(androidx.compose.material.icons.Icons.Outlined.PlayCircle, null, tint = TextTertiary, modifier = Modifier.size(24.dp))

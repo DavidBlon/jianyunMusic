@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -54,9 +55,8 @@ fun DiscoverScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(DarkBg)
             .statusBarsPadding(),
-        contentPadding = PaddingValues(bottom = 96.dp)
+        contentPadding = PaddingValues(bottom = miniPlayerSafeBottomPadding())
     ) {
         item { Header(profile = profile) }
         item { SearchBar(onClick = onSearchClick) }
@@ -77,19 +77,30 @@ private fun Header(profile: UserProfile?) {
         Box(
             modifier = Modifier
                 .size(38.dp)
-                .clip(CircleShape)
-                .background(DarkSurface),
+                .glassSurface(CircleShape, elevation = 8.dp)
+                .padding(2.dp)
+                .clip(CircleShape),
             contentAlignment = Alignment.Center
         ) {
             if (!profile?.avatar.isNullOrBlank()) {
-                AsyncImage(sizedImageUrl(profile?.avatar, 120), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                AsyncImage(
+                    sizedImageUrl(profile?.avatar, 120),
+                    contentDescription = "用户头像",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
             } else {
-                Icon(androidx.compose.material.icons.Icons.Outlined.Person, null, tint = TextPrimary, modifier = Modifier.size(22.dp))
+                Icon(
+                    androidx.compose.material.icons.Icons.Outlined.Person,
+                    contentDescription = "用户",
+                    tint = TextPrimary,
+                    modifier = Modifier.size(20.dp)
+                )
             }
         }
         Spacer(modifier = Modifier.width(10.dp))
         Text(
-            "发现",
+            text = "发现",
             style = MaterialTheme.typography.headlineLarge,
             color = TextPrimary
         )
@@ -102,12 +113,17 @@ private fun SearchBar(onClick: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = 20.dp, end = 20.dp, top = 12.dp)
-            .background(DarkBg3, RoundedCornerShape(10.dp))
+            .glassSurface(RoundedCornerShape(12.dp), elevation = 8.dp)
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(androidx.compose.material.icons.Icons.Outlined.Search, null, tint = TextTertiary, modifier = Modifier.size(18.dp))
+        Icon(
+            androidx.compose.material.icons.Icons.Outlined.Search,
+            contentDescription = null,
+            tint = TextSecondary,
+            modifier = Modifier.size(18.dp)
+        )
         Spacer(modifier = Modifier.width(8.dp))
         Text("搜索歌曲、歌手、专辑", style = MaterialTheme.typography.bodyMedium, color = TextTertiary)
     }
@@ -119,41 +135,71 @@ private fun QuickActions(onClick: (String) -> Unit) {
         modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 18.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        QuickActionItem({ ActionIcon(IconsType.Fm) }, "私人FM", Brush.linearGradient(listOf(Green500, Green700))) { onClick("fm") }
-        QuickActionItem({ ActionIcon(IconsType.Podcast) }, "播客", Brush.linearGradient(listOf(OrangeAccent, Color(0xFFD35400)))) { onClick("podcast") }
-        QuickActionItem({ ActionIcon(IconsType.Rank) }, "排行榜", Brush.linearGradient(listOf(RedAccent, Color(0xFFC0392B)))) { onClick("rank") }
-        QuickActionItem({ ActionIcon(IconsType.Playlist) }, "歌单", null) { onClick("playlist") }
+        QuickActionItem(IconsType.Fm, "私人FM", Green500) { onClick("fm") }
+        QuickActionItem(IconsType.Podcast, "播客", AccentSecondary) { onClick("podcast") }
+        QuickActionItem(IconsType.Rank, "排行榜", AccentHighlight) { onClick("rank") }
+        QuickActionItem(
+            IconsType.Playlist,
+            "歌单",
+            lerp(Green500, AccentHighlight, 0.48f)
+        ) { onClick("playlist") }
     }
 }
 
 @Composable
-private fun QuickActionItem(icon: @Composable () -> Unit, label: String, bg: Brush?, onClick: () -> Unit) {
+private fun QuickActionItem(
+    type: IconsType,
+    label: String,
+    tint: Color,
+    onClick: () -> Unit
+) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             modifier = Modifier
                 .size(48.dp)
-                .clip(CircleShape)
-                .then(if (bg != null) Modifier.background(bg) else Modifier.background(DarkSurface))
+                .glassSurface(CircleShape, tint = tint, elevation = 8.dp)
                 .clickable(onClick = onClick),
             contentAlignment = Alignment.Center
         ) {
-            icon()
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.radialGradient(
+                            listOf(tint.copy(alpha = 0.32f), Color.Transparent)
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                ActionIcon(type, tint)
+            }
         }
-        Text(label, style = MaterialTheme.typography.labelMedium, color = TextSecondary, modifier = Modifier.padding(top = 6.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = TextSecondary,
+            modifier = Modifier.padding(top = 6.dp)
+        )
     }
 }
 
 private enum class IconsType { Fm, Podcast, Rank, Playlist }
 
 @Composable
-private fun ActionIcon(type: IconsType) {
+private fun ActionIcon(type: IconsType, tint: Color) {
     val icon = when (type) {
         IconsType.Fm -> androidx.compose.material.icons.Icons.Outlined.Hearing
         IconsType.Podcast -> androidx.compose.material.icons.Icons.Outlined.Mic
         IconsType.Rank -> androidx.compose.material.icons.Icons.Outlined.BarChart
         IconsType.Playlist -> androidx.compose.material.icons.Icons.AutoMirrored.Outlined.QueueMusic
     }
-    Icon(icon, null, tint = if (type == IconsType.Playlist) TextPrimary else Color.White, modifier = Modifier.size(22.dp))
+    Icon(
+        icon,
+        contentDescription = null,
+        tint = lerp(tint, Color.White, 0.18f),
+        modifier = Modifier.size(22.dp)
+    )
 }
 
 @Composable
@@ -183,18 +229,44 @@ private fun RecommendedPlaylists(playlists: List<PinnedPlaylist>, onClick: (Long
 @Composable
 private fun PlaylistCard(playlist: PinnedPlaylist, onClick: () -> Unit) {
     Column(modifier = Modifier.width(118.dp).clickable(onClick = onClick)) {
-        Box(modifier = Modifier.size(118.dp).clip(RoundedCornerShape(10.dp)).background(DarkSurface)) {
+        Box(
+            modifier = Modifier
+                .size(118.dp)
+                .glassSurface(RoundedCornerShape(12.dp), elevation = 8.dp)
+        ) {
             if (!playlist.picUrl.isNullOrBlank()) {
                 AsyncImage(sizedImageUrl(playlist.picUrl, 260), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+                    .align(Alignment.BottomCenter)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.46f))
+                        )
+                    )
+            )
             Text(
                 text = formatPlayCount(playlist.playCount),
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.White,
-                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).background(Color(0x66000000), RoundedCornerShape(8.dp)).padding(horizontal = 6.dp, vertical = 2.dp)
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .background(Color(0x78090C10), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
             )
         }
-        Text(playlist.name, style = MaterialTheme.typography.bodySmall, color = TextPrimary, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp))
+        Text(
+            playlist.name,
+            style = MaterialTheme.typography.bodySmall,
+            color = TextPrimary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 6.dp)
+        )
     }
 }
 
@@ -215,7 +287,11 @@ private fun RecommendedSongs(songs: List<Song>, onClick: (Long) -> Unit) {
 @Composable
 private fun SongCard(song: Song, onClick: () -> Unit) {
     Column(modifier = Modifier.width(118.dp).clickable(onClick = onClick)) {
-        Box(modifier = Modifier.size(118.dp).clip(RoundedCornerShape(10.dp)).background(DarkSurface)) {
+        Box(
+            modifier = Modifier
+                .size(118.dp)
+                .glassSurface(RoundedCornerShape(12.dp), elevation = 8.dp)
+        ) {
             val albumUrl = song.album?.picUrl
             if (!albumUrl.isNullOrBlank()) {
                 AsyncImage(sizedImageUrl(albumUrl, 260), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)

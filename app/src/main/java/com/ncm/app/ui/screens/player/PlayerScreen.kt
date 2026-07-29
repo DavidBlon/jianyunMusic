@@ -1,9 +1,5 @@
 package com.ncm.app.ui.screens.player
 
-import android.content.Intent
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -36,9 +32,6 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.HighQuality
-import androidx.compose.material.icons.outlined.DeleteOutline
-import androidx.compose.material.icons.outlined.Image
-import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Repeat
 import androidx.compose.material.icons.outlined.RepeatOne
 import androidx.compose.material.icons.outlined.Shuffle
@@ -46,7 +39,6 @@ import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.*
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -54,7 +46,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
@@ -66,25 +57,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.media3.common.MediaItem
-import androidx.media3.common.C
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.AspectRatioFrameLayout
-import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.ncm.app.ui.theme.*
 import com.ncm.app.NeteaseApp
+import com.ncm.app.data.model.PlaybackSource
+import com.ncm.app.data.model.ArtistBrief
+import com.ncm.app.ui.components.ArtistLinks
+import com.ncm.app.ui.components.LinglanSourceBadge
 import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.PlayMode
@@ -97,6 +81,7 @@ import kotlin.math.sin
 fun PlayerScreen(
     songId: Long,
     onBack: () -> Unit,
+    onArtistClick: (Long) -> Unit,
     mainViewModel: MainViewModel,
     viewModel: PlayerViewModel = viewModel()
 ) {
@@ -107,21 +92,10 @@ fun PlayerScreen(
     val playerLayout by appearanceSettings.layout.collectAsState()
     val playerBackground by appearanceSettings.background.collectAsState()
     val customBackground by appearanceSettings.customBackground.collectAsState()
+    val applyCustomBackgroundGlobally by appearanceSettings.applyCustomBackgroundGlobally.collectAsState()
     val componentVisibility by appearanceSettings.componentVisibility.collectAsState()
     val showLyrics by appearanceSettings.showLyrics.collectAsState()
-    val context = LocalContext.current
-    val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        uri ?: return@rememberLauncherForActivityResult
-        try {
-            context.contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION
-            )
-        } catch (_: SecurityException) {
-            // The system photo picker may already own the long-lived grant.
-        }
-        appearanceSettings.setCustomBackground(uri.toString(), context.contentResolver.getType(uri))
-    }
+    val useGlobalCustomBackground = applyCustomBackgroundGlobally && customBackground != null
 
     LaunchedEffect(songId) {
         viewModel.open(songId)
@@ -148,24 +122,33 @@ fun PlayerScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(Color(0xFF1A0A0A), DarkBg)))
-    ) {
-        customBackground?.let { media ->
-            CustomMediaBackground(
-                media = media,
-                initialVideoPositionMs = appearanceSettings.videoResumePosition(media.uri),
-                onVideoPositionSaved = appearanceSettings::saveVideoResumePosition
+            .then(
+                if (useGlobalCustomBackground) {
+                    Modifier
+                } else {
+                    Modifier.background(Brush.verticalGradient(listOf(Color(0xFF111821), DarkBg)))
+                }
             )
-            CustomBackgroundScrim()
+    ) {
+        if (!useGlobalCustomBackground) {
+            customBackground?.let { media ->
+                CustomMediaBackground(
+                    media = media,
+                    initialVideoPositionMs = appearanceSettings.videoResumePosition(media.uri),
+                    onVideoPositionSaved = appearanceSettings::saveVideoResumePosition
+                )
+                CustomBackgroundScrim()
+            }
         }
         if (customBackground?.type != PlayerCustomMediaType.VIDEO) {
             PlayerAtmosphere(background = playerBackground)
         }
         PlayerTopBar(
             title = state.currentSong?.name ?: "未知歌曲",
-            subtitle = state.currentSong?.artistText ?: "未知歌手",
+            artists = state.currentSong?.artists,
             audioSource = state.audioSource,
             onBack = onBack,
+            onArtistClick = onArtistClick,
             isLiked = state.isLiked,
             isLikeUpdating = state.isLikeUpdating,
             onLikeClick = {
@@ -286,15 +269,8 @@ fun PlayerScreen(
         PlayerBottomPanel.APPEARANCE -> AppearanceSheet(
             layout = playerLayout,
             background = playerBackground,
-            customBackground = customBackground,
             componentVisibility = componentVisibility,
             onDismiss = { bottomPanel = null },
-            onPickMedia = {
-                mediaPicker.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                )
-            },
-            onClearMedia = appearanceSettings::clearCustomBackground,
             onLayoutSelected = appearanceSettings::setLayout,
             onBackgroundSelected = appearanceSettings::setBackground,
             onComponentVisibilityChanged = appearanceSettings::setComponentVisible,
@@ -339,9 +315,10 @@ private fun UnavailablePanel(
 @Composable
 private fun PlayerTopBar(
     title: String,
-    subtitle: String,
+    artists: List<ArtistBrief>?,
     audioSource: String,
     onBack: () -> Unit,
+    onArtistClick: (Long) -> Unit,
     isLiked: Boolean,
     isLikeUpdating: Boolean,
     onLikeClick: () -> Unit,
@@ -389,12 +366,11 @@ private fun PlayerTopBar(
                     )
                     AudioSourceTag(source = audioSource)
                 }
-                Text(
-                    text = subtitle,
+                ArtistLinks(
+                    artists = artists,
+                    onArtistClick = onArtistClick,
                     style = MaterialTheme.typography.labelMedium,
                     color = TextTertiary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 2.dp)
                 )
             }
@@ -427,10 +403,13 @@ private fun PlayerTopBar(
 
 @Composable
 private fun AudioSourceTag(source: String) {
+    if (PlaybackSource.isLinglan(source)) {
+        LinglanSourceBadge(modifier = Modifier.padding(start = 8.dp))
+        return
+    }
+
     val label = when (source) {
-        "huibq-wy" -> "Huibq"
-        "ikun-wy" -> "ikun"
-        "kugou" -> "酷狗"
+        PlaybackSource.KUGOU -> "酷狗"
         else -> null
     } ?: return
 
@@ -493,126 +472,6 @@ private fun AlbumCover(
             )
         }
     }
-}
-
-@Composable
-private fun CustomMediaBackground(
-    media: PlayerCustomBackground,
-    initialVideoPositionMs: Long,
-    onVideoPositionSaved: (String, Long) -> Unit
-) {
-    when (media.type) {
-        PlayerCustomMediaType.IMAGE -> AsyncImage(
-            model = media.uri,
-            contentDescription = null,
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop
-        )
-
-        PlayerCustomMediaType.VIDEO -> MutedLoopingVideo(
-            uri = media.uri,
-            initialPositionMs = initialVideoPositionMs,
-            onPositionSaved = { positionMs -> onVideoPositionSaved(media.uri, positionMs) }
-        )
-    }
-}
-
-@Composable
-private fun MutedLoopingVideo(
-    uri: String,
-    initialPositionMs: Long,
-    onPositionSaved: (Long) -> Unit
-) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val currentPositionSaver by rememberUpdatedState(onPositionSaved)
-    var firstFrameRendered by remember(uri) { mutableStateOf(false) }
-    val firstFrameAlpha by animateFloatAsState(
-        targetValue = if (firstFrameRendered) 1f else 0f,
-        animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing),
-        label = "videoFirstFrameAlpha"
-    )
-    val player = remember(uri) {
-        ExoPlayer.Builder(context).build().apply {
-            trackSelectionParameters = trackSelectionParameters
-                .buildUpon()
-                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                .setMaxVideoSize(1280, 720)
-                .setMaxVideoFrameRate(30)
-                .setMaxVideoBitrate(2_500_000)
-                .build()
-            addListener(object : Player.Listener {
-                override fun onRenderedFirstFrame() {
-                    firstFrameRendered = true
-                }
-            })
-            setMediaItem(MediaItem.fromUri(uri))
-            if (initialPositionMs > 0L) {
-                seekTo(initialPositionMs)
-            }
-            repeatMode = Player.REPEAT_MODE_ONE
-            volume = 0f
-            playWhenReady = true
-            prepare()
-        }
-    }
-
-    DisposableEffect(player, lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_START -> player.play()
-                Lifecycle.Event.ON_STOP -> {
-                    currentPositionSaver(player.currentPosition)
-                    player.pause()
-                }
-                else -> Unit
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-            currentPositionSaver(player.currentPosition)
-            player.release()
-        }
-    }
-
-    Box(modifier = Modifier.fillMaxSize()) {
-        AndroidView(
-            factory = { viewContext ->
-                PlayerView(viewContext).apply {
-                    useController = false
-                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                    setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    this.player = player
-                }
-            },
-            update = { it.player = player },
-            modifier = Modifier.fillMaxSize()
-        )
-        if (firstFrameAlpha < 1f) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 1f - firstFrameAlpha))
-            )
-        }
-    }
-}
-
-@Composable
-private fun CustomBackgroundScrim() {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    0f to Color.Black.copy(alpha = 0.54f),
-                    0.42f to Color.Black.copy(alpha = 0.18f),
-                    1f to Color.Black.copy(alpha = 0.68f)
-                )
-            )
-    )
 }
 
 @Composable
@@ -948,7 +807,8 @@ private fun PlayerControls(
 
                     IconButton(
                         onClick = onPlayPauseClick,
-                        modifier = Modifier.size(64.dp)
+                        modifier = Modifier
+                            .size(64.dp)
                     ) {
                         Icon(
                             imageVector = if (isPlaying) androidx.compose.material.icons.Icons.Filled.Pause else androidx.compose.material.icons.Icons.Filled.PlayArrow,
@@ -981,7 +841,7 @@ private fun PlayerControls(
                         DropdownMenu(
                             expanded = qualityMenuExpanded,
                             onDismissRequest = { onQualityMenuExpandedChange(false) },
-                            containerColor = DarkSurface
+                            containerColor = GlassSurfaceStrong
                         ) {
                             PlaybackQuality.entries.forEach { item ->
                                 DropdownMenuItem(
@@ -1025,7 +885,7 @@ private fun QueueSheet(
     onClear: () -> Unit
 ) {
     var showHistory by remember { mutableStateOf(false) }
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = DarkSurface) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = GlassSurfaceStrong) {
         Column(modifier = Modifier.fillMaxWidth().heightIn(max = 560.dp).padding(horizontal = 20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 TextButton(onClick = { showHistory = false }) { Text("播放列表 ${queue.size}", color = if (!showHistory) Green500 else TextSecondary) }
@@ -1066,7 +926,7 @@ private fun SleepTimerSheet(
     onDismiss: () -> Unit,
     onSet: (Int) -> Unit
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = DarkSurface) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = GlassSurfaceStrong) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp)) {
             Text(
                 "睡眠定时",
@@ -1089,18 +949,15 @@ private fun SleepTimerSheet(
 private fun AppearanceSheet(
     layout: PlayerLayout,
     background: PlayerBackground,
-    customBackground: PlayerCustomBackground?,
     componentVisibility: PlayerComponentVisibility,
     onDismiss: () -> Unit,
-    onPickMedia: () -> Unit,
-    onClearMedia: () -> Unit,
     onLayoutSelected: (PlayerLayout) -> Unit,
     onBackgroundSelected: (PlayerBackground) -> Unit,
     onComponentVisibilityChanged: (PlayerComponent, Boolean) -> Unit,
     onApplyImmersivePreset: () -> Unit,
     onResetComponents: () -> Unit
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = DarkSurface) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = GlassSurfaceStrong) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1110,14 +967,6 @@ private fun AppearanceSheet(
                 .padding(bottom = 28.dp)
         ) {
             Text("播放页个性化", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-
-            AppearanceSectionTitle("我的背景", modifier = Modifier.padding(top = 24.dp))
-            CustomBackgroundCard(
-                media = customBackground,
-                onPickMedia = onPickMedia,
-                onClearMedia = onClearMedia,
-                modifier = Modifier.padding(top = 8.dp)
-            )
 
             AppearanceSectionTitle("界面组件", modifier = Modifier.padding(top = 24.dp))
             PlayerComponent.entries.forEach { component ->
@@ -1133,8 +982,12 @@ private fun AppearanceSheet(
             ) {
                 Button(
                     onClick = onApplyImmersivePreset,
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Green500)
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                        .accentSurface(RoundedCornerShape(14.dp)),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent)
                 ) {
                     Text("一键沉浸")
                 }
@@ -1193,70 +1046,6 @@ private fun AppearanceSectionTitle(
         fontWeight = FontWeight.SemiBold,
         modifier = modifier
     )
-}
-
-@Composable
-private fun CustomBackgroundCard(
-    media: PlayerCustomBackground?,
-    onPickMedia: () -> Unit,
-    onClearMedia: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = DarkSurface2
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Green500.copy(alpha = 0.14f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = if (media?.type == PlayerCustomMediaType.VIDEO) {
-                            androidx.compose.material.icons.Icons.Outlined.Movie
-                        } else {
-                            androidx.compose.material.icons.Icons.Outlined.Image
-                        },
-                        contentDescription = null,
-                        tint = Green500,
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-                Text(
-                    text = when (media?.type) {
-                        PlayerCustomMediaType.IMAGE -> "已使用相册照片"
-                        PlayerCustomMediaType.VIDEO -> "已使用静音循环视频"
-                        null -> "使用照片或视频"
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextPrimary,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.weight(1f).padding(start = 12.dp)
-                )
-                if (media != null) {
-                    IconButton(onClick = onClearMedia) {
-                        Icon(
-                            androidx.compose.material.icons.Icons.Outlined.DeleteOutline,
-                            contentDescription = "移除自定义背景",
-                            tint = TextSecondary
-                        )
-                    }
-                }
-            }
-            Button(
-                onClick = onPickMedia,
-                modifier = Modifier.fillMaxWidth().padding(top = 14.dp).heightIn(min = 48.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Green500)
-            ) {
-                Text(if (media == null) "从相册选择" else "更换照片或视频")
-            }
-        }
-    }
 }
 
 @Composable

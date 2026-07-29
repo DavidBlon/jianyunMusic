@@ -11,7 +11,11 @@ sealed class Screen(val route: String) {
         fun createRoute(songId: Long) = "player/$songId"
     }
     data object Search : Screen("search")
+    data object ArtistDetail : Screen("artist/{artistId}") {
+        fun createRoute(artistId: Long) = "artist/$artistId"
+    }
     data object My : Screen("my")
+    data object Disclaimer : Screen("disclaimer")
     data object Login : Screen("login")
 }
 

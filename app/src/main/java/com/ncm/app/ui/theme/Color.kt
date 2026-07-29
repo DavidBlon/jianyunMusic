@@ -2,27 +2,41 @@ package com.ncm.app.ui.theme
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 
-val DefaultGreen500 = Color(0xFF58B86A)
+val DefaultGreen500 = Color(0xFF72D69B)
+val DefaultAccentSecondary = Color(0xFF4DB8A5)
+val DefaultAccentHighlight = Color(0xFFD6B86B)
 val LocalAccentColor = staticCompositionLocalOf { DefaultGreen500 }
+val LocalAccentSecondaryColor = staticCompositionLocalOf { DefaultAccentSecondary }
+val LocalAccentHighlightColor = staticCompositionLocalOf { DefaultAccentHighlight }
 val Green500: Color
     @Composable get() = LocalAccentColor.current
-val Green600 = Color(0xFF4AA85C)
-val Green700 = Color(0xFF3D8B4F)
-val Green800 = Color(0xFF2D6B3C)
-val GreenAccent = Color(0xFF62D975)
+val AccentSecondary: Color
+    @Composable get() = LocalAccentSecondaryColor.current
+val AccentHighlight: Color
+    @Composable get() = LocalAccentHighlightColor.current
 
-val DarkBg = Color(0xFF0A0A0C)
-val DarkBg2 = Color(0xFF121214)
-val DarkBg3 = Color(0xFF1A1A1E)
-val DarkSurface = Color(0xFF1E1E24)
-val DarkSurface2 = Color(0xFF28282E)
-val DarkBorder = Color(0xFF2A2A30)
+@Composable
+fun accentBrush(): Brush = Brush.linearGradient(
+    listOf(AccentHighlight, Green500, AccentSecondary)
+)
+val Green600 = Color(0xFF54BC69)
+val Green700 = Color(0xFF3F9654)
+val Green800 = Color(0xFF2F7140)
+val GreenAccent = Color(0xFF78E68B)
 
-val TextPrimary = Color(0xFFF0F0F2)
-val TextSecondary = Color(0xFF909098)
-val TextTertiary = Color(0xFF55555E)
+val DarkBg = Color(0xFF090C10)
+val DarkBg2 = Color(0xFF10151A)
+val DarkBg3 = Color(0xFF151B21)
+val DarkSurface = Color(0xFF1A2027)
+val DarkSurface2 = Color(0xFF242B33)
+val DarkBorder = Color(0xFF303943)
+
+val TextPrimary = Color(0xFFF5F7F9)
+val TextSecondary = Color(0xFFA9B1BA)
+val TextTertiary = Color(0xFF7A858F)
 
 val RedAccent = Color(0xFFE74C3C)
 val OrangeAccent = Color(0xFFF39C12)
@@ -34,4 +48,4 @@ val GradientEnd1 = Color(0xFF0D1F10)
 val GradientOverlay1 = Color(0xFF1A1A2E)
 
 val LikeRed = Color(0xFFE74C3C)
-val MiniPlayerBg = Color(0xFF1E1E24)
+val MiniPlayerBg = GlassSurfaceStrong

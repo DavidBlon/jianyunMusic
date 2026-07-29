@@ -78,6 +78,12 @@ class PlayerAppearanceSettings(context: Context) {
     private val _customBackground = MutableStateFlow(loadCustomBackground())
     val customBackground: StateFlow<PlayerCustomBackground?> = _customBackground
 
+    private val _applyCustomBackgroundGlobally = MutableStateFlow(
+        prefs.getBoolean(KEY_APPLY_CUSTOM_BACKGROUND_GLOBALLY, false) &&
+            _customBackground.value != null
+    )
+    val applyCustomBackgroundGlobally: StateFlow<Boolean> = _applyCustomBackgroundGlobally
+
     private val _componentVisibility = MutableStateFlow(loadComponentVisibility())
     val componentVisibility: StateFlow<PlayerComponentVisibility> = _componentVisibility
 
@@ -116,8 +122,16 @@ class PlayerAppearanceSettings(context: Context) {
             .remove(KEY_CUSTOM_MEDIA_TYPE)
             .remove(KEY_VIDEO_POSITION_URI)
             .remove(KEY_VIDEO_POSITION_MS)
+            .putBoolean(KEY_APPLY_CUSTOM_BACKGROUND_GLOBALLY, false)
             .apply()
         _customBackground.value = null
+        _applyCustomBackgroundGlobally.value = false
+    }
+
+    fun setApplyCustomBackgroundGlobally(applyGlobally: Boolean) {
+        val value = applyGlobally && _customBackground.value != null
+        prefs.edit().putBoolean(KEY_APPLY_CUSTOM_BACKGROUND_GLOBALLY, value).apply()
+        _applyCustomBackgroundGlobally.value = value
     }
 
     fun videoResumePosition(uri: String): Long {
@@ -200,6 +214,7 @@ class PlayerAppearanceSettings(context: Context) {
         const val KEY_BACKGROUND = "background"
         const val KEY_CUSTOM_MEDIA_URI = "custom_media_uri"
         const val KEY_CUSTOM_MEDIA_TYPE = "custom_media_type"
+        const val KEY_APPLY_CUSTOM_BACKGROUND_GLOBALLY = "apply_custom_background_globally"
         const val KEY_VIDEO_POSITION_URI = "video_position_uri"
         const val KEY_VIDEO_POSITION_MS = "video_position_ms"
         const val KEY_SHOW_LYRICS = "show_lyrics"

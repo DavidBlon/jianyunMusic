@@ -50,8 +50,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -73,6 +73,7 @@ import androidx.navigation.compose.rememberNavController
 import coil.compose.AsyncImage
 import com.ncm.app.ui.navigation.NavGraph
 import com.ncm.app.ui.navigation.Routes
+import com.ncm.app.ui.components.FirstUseMusicSourcePrompt
 import com.ncm.app.ui.screens.player.PlayerScreen
 import com.ncm.app.ui.theme.*
 import com.ncm.app.util.sizedImageUrl
@@ -110,7 +111,11 @@ class MainActivity : ComponentActivity() {
         requestNotificationPermissionIfNeeded()
         setContent {
             val accentTheme by NeteaseApp.instance.accentThemeSettings.theme.collectAsState()
-            NeteaseMusicTheme(accent = accentTheme.color) {
+            NeteaseMusicTheme(
+                accent = accentTheme.color,
+                secondaryAccent = accentTheme.secondary,
+                highlightAccent = accentTheme.highlight
+            ) {
                 MainApp()
             }
         }
@@ -132,6 +137,13 @@ fun MainApp() {
     val playerViewModel: PlayerViewModel = viewModel()
     val playerState by playerViewModel.state.collectAsState()
     val appState by mainViewModel.appState.collectAsState()
+    val appearanceSettings = NeteaseApp.instance.playerAppearanceSettings
+    val musicSourceSettings = NeteaseApp.instance.musicSourceSettings
+    val customBackground by appearanceSettings.customBackground.collectAsState()
+    val applyCustomBackgroundGlobally by appearanceSettings.applyCustomBackgroundGlobally.collectAsState()
+    val musicSourceKey by musicSourceSettings.cardKey.collectAsState()
+    val firstUsePromptCompleted by musicSourceSettings.firstUsePromptCompleted.collectAsState()
+    val useGlobalCustomBackground = applyCustomBackgroundGlobally && customBackground != null
 
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
@@ -143,6 +155,7 @@ fun MainApp() {
     var miniPlayerBlocked by remember { mutableStateOf(false) }
     var selectedBottomRoute by rememberSaveable { mutableStateOf(Routes.DISCOVER) }
     var playerOverlaySongId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var firstUsePromptDismissed by rememberSaveable { mutableStateOf(false) }
     var retainedPlayerSongId by remember { mutableStateOf<Long?>(null) }
 
     val activePlayerSongId = playerOverlaySongId ?: routedPlayerSongId
@@ -200,52 +213,87 @@ fun MainApp() {
             }
         }
     }
+    val onOpenArtist: (Long) -> Unit = remember(navController) {
+        { artistId ->
+            if (artistId > 0) {
+                miniPlayerBlocked = true
+                playerOverlaySongId = null
+                navController.navigate(Routes.artistDetail(artistId))
+            }
+        }
+    }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        Scaffold(
-            containerColor = DarkBg,
-            contentWindowInsets = WindowInsets(0, 0, 0, 0),
-            bottomBar = {
-                if (showBottomBar) {
-                    BottomNavigationBar(
-                        currentRoute = selectedBottomRoute,
-                        onNavigate = onBottomNavigate
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .appBackground(Green500, AccentSecondary, AccentHighlight)
+    ) {
+        if (useGlobalCustomBackground) {
+            customBackground?.let { media ->
+                CustomMediaBackground(
+                    media = media,
+                    initialVideoPositionMs = appearanceSettings.videoResumePosition(media.uri),
+                    onVideoPositionSaved = appearanceSettings::saveVideoResumePosition
+                )
+                CustomBackgroundScrim(global = true)
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    alpha = if (useGlobalCustomBackground && activePlayerSongId != null) 0f else 1f
+                }
+        ) {
+            Scaffold(
+                containerColor = Color.Transparent,
+                contentWindowInsets = WindowInsets(0, 0, 0, 0)
+            ) { contentPadding ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(contentPadding)
+                ) {
+                    NavGraph(
+                        navController = navController,
+                        isLoggedIn = appState.isLoggedIn,
+                        mainViewModel = mainViewModel,
+                        playerViewModel = playerViewModel,
+                        onOpenPlayer = onOpenPlayer,
+                        modifier = Modifier.fillMaxSize()
                     )
+
+                    AnimatedVisibility(
+                        visible = showMiniPlayer,
+                        enter = fadeIn(animationSpec = tween(MINI_PLAYER_FADE_MILLIS)),
+                        exit = fadeOut(animationSpec = tween(MINI_PLAYER_FADE_MILLIS)),
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .navigationBarsPadding()
+                            .padding(bottom = 68.dp)
+                    ) {
+                        MiniPlayer(
+                            songName = playerState.currentSong?.name.orEmpty(),
+                            artist = playerState.currentSong?.artistText.orEmpty(),
+                            coverUrl = playerState.currentSong?.album?.picUrl,
+                            isPlaying = playerState.isPlaying,
+                            progress = playerState.progress,
+                            onPlayPause = { playerViewModel.togglePlay() },
+                            onPrevious = { playerViewModel.playPrev() },
+                            onNext = { playerViewModel.playNext() },
+                            onClick = { playerState.currentSong?.id?.let(onOpenPlayer) }
+                        )
+                    }
                 }
             }
-        ) { padding ->
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-            ) {
-                NavGraph(
-                    navController = navController,
-                    isLoggedIn = appState.isLoggedIn,
-                    mainViewModel = mainViewModel,
-                    playerViewModel = playerViewModel,
-                    onOpenPlayer = onOpenPlayer,
-                    modifier = Modifier.fillMaxSize()
-                )
 
-                AnimatedVisibility(
-                    visible = showMiniPlayer,
-                    enter = fadeIn(animationSpec = tween(MINI_PLAYER_FADE_MILLIS)),
-                    exit = fadeOut(animationSpec = tween(MINI_PLAYER_FADE_MILLIS)),
+            if (showBottomBar) {
+                BottomNavigationBar(
+                    currentRoute = selectedBottomRoute,
+                    onNavigate = onBottomNavigate,
                     modifier = Modifier.align(Alignment.BottomCenter)
-                ) {
-                    MiniPlayer(
-                        songName = playerState.currentSong?.name.orEmpty(),
-                        artist = playerState.currentSong?.artistText.orEmpty(),
-                        coverUrl = playerState.currentSong?.album?.picUrl,
-                        isPlaying = playerState.isPlaying,
-                        progress = playerState.progress,
-                        onPlayPause = { playerViewModel.togglePlay() },
-                        onPrevious = { playerViewModel.playPrev() },
-                        onNext = { playerViewModel.playNext() },
-                        onClick = { playerState.currentSong?.id?.let(onOpenPlayer) }
-                    )
-                }
+                )
             }
         }
 
@@ -267,6 +315,7 @@ fun MainApp() {
                 PlayerScreen(
                     songId = songId,
                     onBack = onClosePlayer,
+                    onArtistClick = onOpenArtist,
                     mainViewModel = mainViewModel,
                     viewModel = playerViewModel
                 )
@@ -277,8 +326,24 @@ fun MainApp() {
             }
         }
 
+        if (!firstUsePromptCompleted && !firstUsePromptDismissed) {
+            FirstUseMusicSourcePrompt(
+                currentMaskedKey = musicSourceKey
+                    .takeIf { it.isNotBlank() }
+                    ?.let { "••••${it.takeLast(4)}" },
+                onClose = { doNotShowAgain ->
+                    if (doNotShowAgain) {
+                        mainViewModel.skipFirstUseMusicSourcePrompt()
+                    }
+                    firstUsePromptDismissed = true
+                },
+                onValidateAndSave = mainViewModel::validateAndSaveMusicSourceKey
+            )
+        }
+        if (firstUsePromptCompleted || firstUsePromptDismissed) {
+            AppUpdatePrompt()
+        }
         OpeningSplash()
-        AppUpdatePrompt()
     }
 }
 
@@ -317,7 +382,8 @@ private fun AppUpdatePrompt() {
     update?.let { info ->
         AlertDialog(
             onDismissRequest = { update = null },
-            containerColor = DarkSurface,
+            containerColor = GlassSurfaceStrong,
+            tonalElevation = 0.dp,
             title = { Text("发现新版本 ${info.versionName}", color = TextPrimary) },
             text = {
                 Text(
@@ -379,7 +445,7 @@ private fun OpeningSplash() {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(DarkBg),
+                .appBackground(Green500, AccentSecondary, AccentHighlight),
             contentAlignment = Alignment.Center
         ) {
             Column(
@@ -449,57 +515,65 @@ private fun OpeningSplash() {
 @Composable
 private fun BottomNavigationBar(
     currentRoute: String?,
-    onNavigate: (String) -> Unit
+    onNavigate: (String) -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    Surface(color = Color.Transparent, tonalElevation = 0.dp, shadowElevation = 0.dp) {
-        Row(
+    Surface(
+        modifier = modifier,
+        color = Color.Transparent,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp
+    ) {
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Color(0xD60A0A0C))
-                .drawBehind {
-                    drawLine(
-                        color = Color.White.copy(alpha = 0.10f),
-                        start = androidx.compose.ui.geometry.Offset(0f, 0f),
-                        end = androidx.compose.ui.geometry.Offset(size.width, 0f),
-                        strokeWidth = 1f
-                    )
-                }
                 .navigationBarsPadding()
-                .height(68.dp)
-                .padding(top = 8.dp, bottom = 4.dp),
-            horizontalArrangement = Arrangement.SpaceAround,
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 14.dp, vertical = 6.dp)
         ) {
-            BottomNavItem(
-                icon = {
-                    Icon(androidx.compose.material.icons.Icons.Filled.Home, null, tint = if (currentRoute == Routes.DISCOVER) Green500 else TextTertiary, modifier = Modifier.size(22.dp))
-                },
-                label = "发现",
-                isActive = currentRoute == Routes.DISCOVER,
-                onClick = { onNavigate(Routes.DISCOVER) }
-            )
-            BottomNavItem(
-                icon = {
-                    Icon(androidx.compose.material.icons.Icons.Outlined.Search, null, tint = if (currentRoute == Routes.SEARCH) Green500 else TextTertiary, modifier = Modifier.size(22.dp))
-                },
-                label = "搜索",
-                isActive = currentRoute == Routes.SEARCH,
-                onClick = { onNavigate(Routes.SEARCH) }
-            )
-            BottomNavItem(
-                icon = {
-                    Icon(androidx.compose.material.icons.Icons.Outlined.Person, null, tint = if (currentRoute == Routes.MY) Green500 else TextTertiary, modifier = Modifier.size(22.dp))
-                },
-                label = "我的",
-                isActive = currentRoute == Routes.MY,
-                onClick = { onNavigate(Routes.MY) }
-            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .glassSurface(RoundedCornerShape(20.dp), elevation = 16.dp)
+                    .padding(3.dp),
+                horizontalArrangement = Arrangement.SpaceAround,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                BottomNavItem(
+                    modifier = Modifier.weight(1f),
+                    icon = {
+                        Icon(androidx.compose.material.icons.Icons.Filled.Home, null, tint = if (currentRoute == Routes.DISCOVER) Green500 else TextTertiary, modifier = Modifier.size(22.dp))
+                    },
+                    label = "发现",
+                    isActive = currentRoute == Routes.DISCOVER,
+                    onClick = { onNavigate(Routes.DISCOVER) }
+                )
+                BottomNavItem(
+                    modifier = Modifier.weight(1f),
+                    icon = {
+                        Icon(androidx.compose.material.icons.Icons.Outlined.Search, null, tint = if (currentRoute == Routes.SEARCH) Green500 else TextTertiary, modifier = Modifier.size(22.dp))
+                    },
+                    label = "搜索",
+                    isActive = currentRoute == Routes.SEARCH,
+                    onClick = { onNavigate(Routes.SEARCH) }
+                )
+                BottomNavItem(
+                    modifier = Modifier.weight(1f),
+                    icon = {
+                        Icon(androidx.compose.material.icons.Icons.Outlined.Person, null, tint = if (currentRoute == Routes.MY) Green500 else TextTertiary, modifier = Modifier.size(22.dp))
+                    },
+                    label = "我的",
+                    isActive = currentRoute == Routes.MY,
+                    onClick = { onNavigate(Routes.MY) }
+                )
+            }
         }
     }
 }
 
 @Composable
 private fun BottomNavItem(
+    modifier: Modifier = Modifier,
     icon: @Composable () -> Unit,
     label: String,
     isActive: Boolean,
@@ -521,26 +595,50 @@ private fun BottomNavItem(
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxHeight()
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick
             )
-            .padding(bottom = 4.dp)
+            .padding(vertical = 4.dp)
     ) {
         Box(
-            modifier = Modifier.graphicsLayer {
-                scaleX = iconScale
-                scaleY = iconScale
-                translationY = iconOffsetY
-            }
+            modifier = Modifier
+                .size(30.dp)
+                .then(
+                    if (isActive) {
+                        Modifier.background(
+                            Brush.radialGradient(
+                                listOf(
+                                    Green500.copy(alpha = 0.24f),
+                                    AccentSecondary.copy(alpha = 0.08f),
+                                    Color.Transparent
+                                )
+                            ),
+                            CircleShape
+                        )
+                    } else {
+                        Modifier
+                    }
+                )
+                .graphicsLayer {
+                    scaleX = iconScale
+                    scaleY = iconScale
+                    translationY = iconOffsetY
+                },
+            contentAlignment = Alignment.Center
         ) {
             icon()
         }
-        Spacer(modifier = Modifier.height(2.dp))
-        Text(label, style = MaterialTheme.typography.labelSmall, color = if (isActive) Green500 else TextTertiary)
+        Spacer(modifier = Modifier.height(1.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (isActive) TextPrimary else TextTertiary,
+            fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium
+        )
     }
 }
 
@@ -567,8 +665,11 @@ fun MiniPlayer(
             .fillMaxWidth()
             .padding(start = 12.dp, end = 12.dp)
             .height(56.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(DarkSurface)
+            .glassSurface(
+                RoundedCornerShape(14.dp),
+                elevation = 14.dp,
+                strong = true
+            )
             .clickable(onClick = onClick)
     ) {
         Row(
@@ -613,8 +714,7 @@ fun MiniPlayer(
                 Box(
                     modifier = Modifier
                         .size(34.dp)
-                        .clip(CircleShape)
-                        .background(Green500)
+                        .accentSurface(CircleShape)
                         .clickable(
                             interactionSource = playPauseInteractionSource,
                             indication = null,
@@ -650,13 +750,15 @@ fun MiniPlayer(
                 .align(Alignment.BottomStart)
                 .fillMaxWidth()
                 .height(2.dp)
-                .background(Color.White.copy(alpha = 0.85f))
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = 0.10f))
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth(visibleProgress)
                     .height(2.dp)
-                    .background(Green500)
+                    .clip(CircleShape)
+                    .background(accentBrush())
             )
         }
     }

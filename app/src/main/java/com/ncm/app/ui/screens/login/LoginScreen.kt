@@ -55,6 +55,8 @@ import com.ncm.app.ui.theme.RedAccent
 import com.ncm.app.ui.theme.TextPrimary
 import com.ncm.app.ui.theme.TextSecondary
 import com.ncm.app.ui.theme.TextTertiary
+import com.ncm.app.ui.theme.accentSurface
+import com.ncm.app.ui.theme.glassSurface
 import com.ncm.app.viewmodel.MainViewModel
 
 private enum class LoginMode {
@@ -94,7 +96,6 @@ fun LoginScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(DarkBg)
             .systemBarsPadding()
             .padding(horizontal = 18.dp, vertical = 22.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -105,9 +106,7 @@ fun LoginScreen(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(18.dp))
-                .background(DarkSurface)
-                .border(1.dp, DarkBorder, RoundedCornerShape(18.dp))
+                .glassSurface(RoundedCornerShape(18.dp), elevation = 14.dp, strong = true)
         ) {
             if (mode == LoginMode.Web) {
                 WebLoginContent(
@@ -372,8 +371,10 @@ private fun LoginActions(
                 Button(
                     onClick = onSubmitCookie,
                     shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Green500),
-                    modifier = Modifier.weight(1f)
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                    modifier = Modifier
+                        .weight(1f)
+                        .accentSurface(RoundedCornerShape(12.dp))
                 ) {
                     Text("完成", color = Color.White)
                 }
@@ -381,8 +382,10 @@ private fun LoginActions(
                 Button(
                     onClick = onRefreshQr,
                     shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Green500),
-                    modifier = Modifier.fillMaxWidth()
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .accentSurface(RoundedCornerShape(12.dp))
                 ) {
                     Text("刷新二维码", color = Color.White)
                 }

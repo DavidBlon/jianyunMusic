@@ -2,9 +2,12 @@ package com.ncm.app
 
 import android.app.Application
 import com.ncm.app.data.AppCache
+import com.ncm.app.data.MusicSourceSettings
 import com.ncm.app.data.SessionManager
 import com.ncm.app.data.api.NeteaseApi
+import com.ncm.app.data.cache.LinglanAudioCache
 import com.ncm.app.data.repository.MusicRepository
+import com.ncm.app.data.repository.MusicSourceKeyValidator
 import com.ncm.app.ui.theme.AccentThemeSettings
 import com.ncm.app.ui.theme.PlayerAppearanceSettings
 import okhttp3.OkHttpClient
@@ -26,6 +29,12 @@ class NeteaseApp : Application() {
 
     lateinit var cache: AppCache
         private set
+    lateinit var musicSourceSettings: MusicSourceSettings
+        private set
+    lateinit var musicSourceKeyValidator: MusicSourceKeyValidator
+        private set
+    lateinit var linglanAudioCache: LinglanAudioCache
+        private set
     lateinit var accentThemeSettings: AccentThemeSettings
         private set
     lateinit var playerAppearanceSettings: PlayerAppearanceSettings
@@ -36,6 +45,9 @@ class NeteaseApp : Application() {
         instance = this
         session = SessionManager(this)
         cache = AppCache(this)
+        musicSourceSettings = MusicSourceSettings(this)
+        musicSourceKeyValidator = MusicSourceKeyValidator()
+        linglanAudioCache = LinglanAudioCache(this)
         accentThemeSettings = AccentThemeSettings(this)
         playerAppearanceSettings = PlayerAppearanceSettings(this)
         cache.removePrefix(AppCache.KEY_PLAYLIST_PREFIX)
@@ -79,7 +91,7 @@ class NeteaseApp : Application() {
             .build()
 
         api = retrofit.create(NeteaseApi::class.java)
-        repository = MusicRepository(api, session)
+        repository = MusicRepository(api, session, linglanAudioCache, musicSourceSettings)
     }
 
     companion object {

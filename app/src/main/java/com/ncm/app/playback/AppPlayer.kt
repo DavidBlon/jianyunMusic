@@ -11,21 +11,22 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.TransferListener
 import androidx.media3.datasource.cache.CacheDataSource
-import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
-import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.session.MediaSession
 import com.ncm.app.MainActivity
 import com.ncm.app.NeteaseApp
+import com.ncm.app.data.cache.LinglanCachePolicy
 import com.ncm.app.data.model.Song
 import com.ncm.app.util.sizedImageUrl
 import okhttp3.OkHttpClient
-import java.io.File
+import java.io.IOException
 
 object AppPlayer {
     private const val TAG = "AppPlayer"
@@ -40,7 +41,7 @@ object AppPlayer {
 
     private var exoPlayer: ExoPlayer? = null
     private var mediaSession: MediaSession? = null
-    private var mediaCache: SimpleCache? = null
+    private var linglanCacheDataSourceFactory: CacheDataSource.Factory? = null
     private var playbackServiceStarted = false
     private var currentSong: Song? = null
     private var currentSource: String = "netease"
@@ -62,20 +63,30 @@ object AppPlayer {
                     .build()
             )
             .setMediaSourceFactory(
-                DefaultMediaSourceFactory(cacheDataSourceFactory(appContext))
+                DefaultMediaSourceFactory(playbackDataSourceFactory())
             )
             .build()
             .also { exoPlayer = it }
     }
 
-    private fun cacheDataSourceFactory(context: Context): CacheDataSource.Factory {
+    private fun playbackDataSourceFactory(): DataSource.Factory {
         val httpDataSourceFactory = OkHttpDataSource.Factory(playbackHttpClient())
             .setUserAgent(PLAYBACK_USER_AGENT)
+        return SelectivePlaybackDataSourceFactory(
+            directFactory = httpDataSourceFactory,
+            linglanFactory = linglanCacheDataSourceFactory()
+        )
+    }
 
-        return CacheDataSource.Factory()
-            .setCache(mediaCache(context))
-            .setUpstreamDataSourceFactory(httpDataSourceFactory)
+    private fun linglanCacheDataSourceFactory(): CacheDataSource.Factory {
+        return linglanCacheDataSourceFactory ?: CacheDataSource.Factory()
+            .setCache(NeteaseApp.instance.linglanAudioCache.cache)
+            .setUpstreamDataSourceFactory(
+                OkHttpDataSource.Factory(playbackHttpClient())
+                    .setUserAgent(PLAYBACK_USER_AGENT)
+            )
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+            .also { linglanCacheDataSourceFactory = it }
     }
 
     private fun playbackHttpClient(): OkHttpClient {
@@ -95,14 +106,6 @@ object AppPlayer {
                 chain.proceed(builder.build())
             }
             .build()
-    }
-
-    private fun mediaCache(context: Context): SimpleCache {
-        return mediaCache ?: SimpleCache(
-            File(context.cacheDir, "media"),
-            LeastRecentlyUsedCacheEvictor(512L * 1024L * 1024L),
-            StandaloneDatabaseProvider(context)
-        ).also { mediaCache = it }
     }
 
     fun startPlaybackService(context: Context) {
@@ -147,6 +150,10 @@ object AppPlayer {
             ?: mediaItem?.mediaId?.toLongOrNull()?.let { mediaSnapshots[it]?.source }
     }
 
+    fun cacheKeyFor(mediaItem: MediaItem?): String? {
+        return mediaItem?.localConfiguration?.customCacheKey
+    }
+
     fun syncCurrentFromPlayer() {
         val player = exoPlayer ?: return
         val mediaItem = player.currentMediaItem ?: return
@@ -183,7 +190,12 @@ object AppPlayer {
             .also { mediaSession = it }
     }
 
-    fun mediaItem(song: Song, url: String, source: String = "netease"): MediaItem {
+    fun mediaItem(
+        song: Song,
+        url: String,
+        source: String = "netease",
+        cacheKey: String? = null
+    ): MediaItem {
         mediaSnapshots[song.id] = PlaybackSnapshot(song, source)
         val metadata = MediaMetadata.Builder()
             .setTitle(song.name)
@@ -196,6 +208,11 @@ object AppPlayer {
         return MediaItem.Builder()
             .setMediaId(song.id.toString())
             .setUri(url)
+            .apply {
+                cacheKey
+                    ?.takeIf(LinglanCachePolicy::isLinglanCacheKey)
+                    ?.let(::setCustomCacheKey)
+            }
             .setMediaMetadata(metadata)
             .build()
     }
@@ -204,6 +221,16 @@ object AppPlayer {
         mediaSnapshots[song.id] = PlaybackSnapshot(song, source)
         currentSong = song
         currentSource = source
+    }
+
+    fun scheduleLinglanCacheFill(url: String, cacheKey: String) {
+        NeteaseApp.instance.linglanAudioCache.scheduleFullCache(
+            url = url,
+            cacheKey = cacheKey,
+            dataSourceFactory = {
+                linglanCacheDataSourceFactory().createDataSourceForDownloading()
+            }
+        )
     }
 
     fun releaseSession() {
@@ -215,8 +242,8 @@ object AppPlayer {
         releaseSession()
         exoPlayer?.release()
         exoPlayer = null
-        mediaCache?.release()
-        mediaCache = null
+        runCatching { NeteaseApp.instance.linglanAudioCache.cancelPendingWrites() }
+        linglanCacheDataSourceFactory = null
         currentSong = null
         currentSource = "netease"
         mediaSnapshots.clear()
@@ -233,5 +260,64 @@ object AppPlayer {
             },
             flags
         )
+    }
+
+    /**
+     * Routes only MediaItems carrying a Linglan custom cache key through CacheDataSource.
+     * Official NetEase and Kugou requests always use a plain OkHttpDataSource.
+     */
+    private class SelectivePlaybackDataSourceFactory(
+        private val directFactory: DataSource.Factory,
+        private val linglanFactory: DataSource.Factory
+    ) : DataSource.Factory {
+        override fun createDataSource(): DataSource {
+            return SelectivePlaybackDataSource(
+                direct = directFactory.createDataSource(),
+                linglan = linglanFactory.createDataSource()
+            )
+        }
+    }
+
+    private class SelectivePlaybackDataSource(
+        private val direct: DataSource,
+        private val linglan: DataSource
+    ) : DataSource {
+        private var openedSource: DataSource? = null
+
+        override fun addTransferListener(transferListener: TransferListener) {
+            direct.addTransferListener(transferListener)
+            linglan.addTransferListener(transferListener)
+        }
+
+        @Throws(IOException::class)
+        override fun open(dataSpec: DataSpec): Long {
+            check(openedSource == null) { "DataSource is already open" }
+            val selected = if (LinglanCachePolicy.isLinglanCacheKey(dataSpec.key)) {
+                linglan
+            } else {
+                direct
+            }
+            openedSource = selected
+            return selected.open(dataSpec)
+        }
+
+        @Throws(IOException::class)
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            return checkNotNull(openedSource) { "DataSource is not open" }
+                .read(buffer, offset, length)
+        }
+
+        override fun getUri(): Uri? = openedSource?.uri
+
+        override fun getResponseHeaders(): Map<String, List<String>> {
+            return openedSource?.responseHeaders.orEmpty()
+        }
+
+        @Throws(IOException::class)
+        override fun close() {
+            val source = openedSource
+            openedSource = null
+            source?.close()
+        }
     }
 }

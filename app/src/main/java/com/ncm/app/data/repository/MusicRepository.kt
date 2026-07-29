@@ -10,7 +10,9 @@ import com.google.gson.JsonParser
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.MultiFormatWriter
 import com.ncm.app.data.SessionManager
+import com.ncm.app.data.MusicSourceSettings
 import com.ncm.app.data.api.NeteaseApi
+import com.ncm.app.data.cache.LinglanAudioCache
 import com.ncm.app.data.model.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -29,7 +31,9 @@ import kotlin.random.Random
 
 class MusicRepository(
     private val api: NeteaseApi,
-    private val session: SessionManager
+    private val session: SessionManager,
+    private val linglanAudioCache: LinglanAudioCache,
+    private val musicSourceSettings: MusicSourceSettings
 ) {
 
     private companion object {
@@ -38,7 +42,7 @@ class MusicRepository(
         private const val NETWORK_MAX_ATTEMPTS = 3
         private const val NETWORK_RETRY_DELAY_MS = 450L
         private const val OFFICIAL_SONG_URL_TIMEOUT_MS = 6_000L
-        private const val BACKUP_SONG_URL_TIMEOUT_MS = 6_500L
+        private const val BACKUP_SONG_URL_TIMEOUT_MS = 11_500L
         private const val PLAYLIST_INITIAL_TRACK_LIMIT = 120
         private const val PLAYLIST_FULL_TRACK_LIMIT = 100000
         private const val PLAYBACK_USER_AGENT =
@@ -96,7 +100,13 @@ class MusicRepository(
             .mapNotNull { it.objOrNull()?.toSong() }
     }
 
-    private val unblockManager = UnblockManager()
+    private var unblockManager = UnblockManager(musicSourceSettings)
+
+    fun onMusicSourceKeyChanged() {
+        // Reset provider circuit-breaker state so a newly validated key becomes
+        // effective immediately even if the previous key had failed.
+        unblockManager = UnblockManager(musicSourceSettings)
+    }
 
     suspend fun getSongUrl(songId: Long, br: Int = 128000, fee: Int = 0): Result<SongUrlResponse> = safeCall {
         // Step 1: 先尝试从网易云官方 API 获取
@@ -121,6 +131,8 @@ class MusicRepository(
             )
         }
 
+        cachedLinglanSongUrl(songId, br)?.let { return@safeCall it }
+
         // Step 2: 官方不可用，尝试从本地替代音源获取
         try {
             // 先获取歌曲详情用于匹配
@@ -135,15 +147,7 @@ class MusicRepository(
             )
             val result = unblockManager.unblock(info)
             if (result != null) {
-                return@safeCall SongUrlResponse(
-                    url = result.url,
-                    source = result.source,
-                    br = result.bitrate,
-                    type = "mp3",
-                    code = 200,
-                    loggedIn = session.isLoggedIn,
-                    error = null
-                )
+                return@safeCall result.toSongUrlResponse(songId)
             }
         } catch (_: Exception) {
             // 替代音源不可用，忽略
@@ -197,13 +201,61 @@ class MusicRepository(
         )
     }
 
-    suspend fun getBackupSongUrl(songId: Long, br: Int = 128000): Result<SongUrlResponse> = safeCall {
-        getBackupSongUrlInternal(songId, br) ?: SongUrlResponse(
+    /**
+     * Queue preparation deliberately excludes the paid Linglan provider and its persistent cache.
+     * It resolves only through the official NetEase endpoint and then Kugou.
+     */
+    suspend fun getSongUrlForPrefetch(
+        songId: Long,
+        br: Int = 128000,
+        fee: Int = 0
+    ): Result<SongUrlResponse> = safeCall {
+        val item = withTimeoutOrNull(OFFICIAL_SONG_URL_TIMEOUT_MS) {
+            runCatching {
+                api.getSongUrl("[$songId]", br).array("data").firstOrNull()?.objOrNull()
+            }.getOrNull()
+        }
+        val playableUrl = item?.string("url")?.replaceFirst("http://", "https://")
+        val code = item?.int("code") ?: 404
+
+        if (!playableUrl.isNullOrBlank() && shouldUseOfficialMediaUrl(playableUrl)) {
+            return@safeCall SongUrlResponse(
+                url = playableUrl,
+                source = PlaybackSource.NETEASE,
+                br = item?.int("br") ?: 0,
+                size = item?.long("size") ?: 0,
+                type = item?.string("type"),
+                encodeType = item?.string("encodeType"),
+                freeTrialInfo = item?.get("freeTrialInfo"),
+                code = code,
+                loggedIn = session.isLoggedIn,
+                error = null
+            )
+        }
+
+        getKugouSongUrlInternal(songId, br)?.let { return@safeCall it }
+
+        SongUrlResponse(
+            url = null,
+            br = item?.int("br") ?: 0,
+            size = item?.long("size") ?: 0,
+            code = code,
+            loggedIn = session.isLoggedIn,
+            error = playbackUnavailableMessage(item, null, code, fee)
+        )
+    }
+
+    suspend fun getBackupSongUrl(
+        songId: Long,
+        br: Int = 128000,
+        excludedSources: Set<String> = emptySet()
+    ): Result<SongUrlResponse> = safeCall {
+        getBackupSongUrlInternal(songId, br, excludedSources) ?: SongUrlResponse(
             url = null,
             br = br,
             code = 404,
             loggedIn = session.isLoggedIn,
-            error = "备用音源暂时不可用"
+            error = "聆澜及兜底音源暂时不可用"
         )
     }
 
@@ -240,7 +292,17 @@ class MusicRepository(
         }.getOrNull()
     }
 
-    private suspend fun getBackupSongUrlInternal(songId: Long, br: Int): SongUrlResponse? {
+    private suspend fun getBackupSongUrlInternal(
+        songId: Long,
+        br: Int,
+        excludedSources: Set<String> = emptySet()
+    ): SongUrlResponse? {
+        if (
+            PlaybackSource.LINGLAN !in excludedSources &&
+            PlaybackSource.LINGLAN_CACHE !in excludedSources
+        ) {
+            cachedLinglanSongUrl(songId, br)?.let { return it }
+        }
         return withTimeoutOrNull(BACKUP_SONG_URL_TIMEOUT_MS) {
             val songs = getSongDetail(listOf(songId)).getOrNull().orEmpty()
             val song = songs.firstOrNull()
@@ -251,17 +313,52 @@ class MusicRepository(
                 duration = song?.dt ?: 0,
                 quality = RepositoryPolicy.backupQualityFor(br)
             )
-            val result = unblockManager.unblock(info) ?: return@withTimeoutOrNull null
-            SongUrlResponse(
-                url = result.url,
-                source = result.source,
-                br = result.bitrate,
-                type = "mp3",
-                code = 200,
-                loggedIn = session.isLoggedIn,
-                error = null
-            )
+            val result = unblockManager.unblock(info, excludedSources) ?: return@withTimeoutOrNull null
+            result.toSongUrlResponse(songId)
         }
+    }
+
+    private suspend fun getKugouSongUrlInternal(songId: Long, br: Int): SongUrlResponse? {
+        return withTimeoutOrNull(BACKUP_SONG_URL_TIMEOUT_MS) {
+            val songs = getSongDetail(listOf(songId)).getOrNull().orEmpty()
+            val song = songs.firstOrNull()
+            val info = UnblockManager.SongInfo(
+                id = songId,
+                name = song?.name ?: "",
+                artists = song?.artists.orEmpty(),
+                duration = song?.dt ?: 0,
+                quality = RepositoryPolicy.backupQualityFor(br)
+            )
+            unblockManager.kugouOnly(info)?.toSongUrlResponse(songId)
+        }
+    }
+
+    private fun cachedLinglanSongUrl(songId: Long, br: Int): SongUrlResponse? {
+        val cached = linglanAudioCache.findReusable(songId, br) ?: return null
+        return SongUrlResponse(
+            url = cached.url,
+            source = cached.source,
+            br = cached.bitrate,
+            type = "mp3",
+            code = 200,
+            loggedIn = session.isLoggedIn,
+            error = null
+        )
+    }
+
+    private fun UnblockManager.MatchResult.toSongUrlResponse(songId: Long): SongUrlResponse {
+        if (source == PlaybackSource.LINGLAN) {
+            linglanAudioCache.rememberSource(songId, bitrate, url)
+        }
+        return SongUrlResponse(
+            url = url,
+            source = source,
+            br = bitrate,
+            type = "mp3",
+            code = 200,
+            loggedIn = session.isLoggedIn,
+            error = null
+        )
     }
 
     suspend fun getLyric(id: Long): Result<LyricResponse> = safeCall {
@@ -270,6 +367,57 @@ class MusicRepository(
             lyric = body.obj("lrc").string("lyric").orEmpty(),
             tlyric = body.obj("tlyric").string("lyric").orEmpty(),
             yrc = body.obj("yrc").string("lyric").orEmpty()
+        )
+    }
+
+    suspend fun getArtistDetail(id: Long): Result<ArtistDetail> = safeCall {
+        require(id > 0) { "歌手 ID 无效" }
+
+        val overview = api.getArtistOverview(id)
+        val artist = overview.obj("artist")
+        if (artist.size() == 0) {
+            throw IOException("未找到歌手信息")
+        }
+
+        val introduction = runCatching { api.getArtistIntroduction(id) }.getOrNull()
+        val briefDescription = (
+            artist.string("briefDesc")
+                ?: introduction?.string("briefDesc")
+            ).orEmpty().trim()
+        val fullDescription = introduction
+            ?.array("introduction")
+            ?.mapNotNull { entry ->
+                val section = entry.objOrNull() ?: return@mapNotNull null
+                val title = section.string("ti").orEmpty().trim()
+                val text = section.string("txt").orEmpty().trim()
+                when {
+                    title.isBlank() -> text.takeIf { it.isNotBlank() }
+                    text.isBlank() -> title
+                    else -> "$title\n$text"
+                }
+            }
+            ?.joinToString("\n\n")
+            .orEmpty()
+            .ifBlank { briefDescription }
+
+        ArtistDetail(
+            id = artist.long("id").takeIf { it > 0 } ?: id,
+            name = artist.string("name").orEmpty().ifBlank { "未知歌手" },
+            avatarUrl = (
+                artist.string("picUrl")
+                    ?: artist.string("img1v1Url")
+                    ?: artist.string("cover")
+                )?.httpsUrl(),
+            aliases = artist.array("alias")
+                .mapNotNull { alias -> runCatching { alias.asString.trim() }.getOrNull() }
+                .filter { it.isNotBlank() },
+            briefDescription = briefDescription,
+            fullDescription = fullDescription,
+            musicCount = artist.int("musicSize"),
+            albumCount = artist.int("albumSize"),
+            mvCount = artist.int("mvSize"),
+            hotSongs = overview.array("hotSongs")
+                .mapNotNull { it.objOrNull()?.toSong() }
         )
     }
 

@@ -59,6 +59,16 @@ interface NeteaseApi {
         @Query("tv") tv: Int = -1
     ): JsonObject
 
+    @GET("api/v1/artist/{id}")
+    suspend fun getArtistOverview(
+        @Path("id") artistId: Long
+    ): JsonObject
+
+    @GET("api/artist/introduction")
+    suspend fun getArtistIntroduction(
+        @Query("id") artistId: Long
+    ): JsonObject
+
     @FormUrlEncoded
     @POST("api/radio/like")
     suspend fun likeSong(

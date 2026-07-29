@@ -7,7 +7,62 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val localPropertiesFile = rootProject.file("local.properties")
+val localProperties = Properties()
+if (localPropertiesFile.exists()) {
+    FileInputStream(localPropertiesFile).use { localProperties.load(it) }
+}
 
+val paidMusicSourceFiles = rootProject.projectDir
+    .listFiles()
+    .orEmpty()
+    .filter { file ->
+        file.isFile &&
+            file.name.startsWith("lx-music-source-paid-") &&
+            file.extension.equals("js", ignoreCase = true)
+    }
+val paidMusicSourceFile = paidMusicSourceFiles.singleOrNull()
+if (paidMusicSourceFiles.size > 1) {
+    logger.warn(
+        "Multiple lx-music-source-paid-*.js files found; ignoring them. " +
+            "Keep one file or configure paidMusicApiUrl explicitly."
+    )
+}
+val paidMusicSourceScript = paidMusicSourceFile?.readText(Charsets.UTF_8).orEmpty()
+
+fun paidMusicScriptConstant(name: String): String? {
+    if (paidMusicSourceScript.isBlank()) return null
+    val pattern = Regex(
+        """(?m)^\s*const\s+${Regex.escape(name)}\s*=\s*["']([^"']*)["']"""
+    )
+    return pattern.find(paidMusicSourceScript)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+}
+
+fun nonBlank(value: String?): String? = value?.trim()?.takeIf { it.isNotEmpty() }
+
+fun buildConfigString(value: String): String = buildString {
+    append('"')
+    value.forEach { char ->
+        when (char) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '\r' -> append("\\r")
+            '\n' -> append("\\n")
+            else -> append(char)
+        }
+    }
+    append('"')
+}
+
+val paidMusicApiUrl = nonBlank(providers.gradleProperty("paidMusicApiUrl").orNull)
+    ?: nonBlank(providers.environmentVariable("PAID_MUSIC_API_URL").orNull)
+    ?: nonBlank(localProperties.getProperty("paidMusicApiUrl"))
+    ?: paidMusicScriptConstant("API_URL")
+    ?: "https://source.shiqianjiang.cn/api/music"
 
 val keystorePropertiesFile = rootProject.file("app/keystore.properties")
 val keystoreProperties = Properties()
@@ -23,10 +78,11 @@ android {
         applicationId = "com.ncm.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.2.4"
+        versionCode = 8
+        versionName = "1.3.0"
 
         buildConfigField("String", "API_BASE_URL", "\"https://music.163.com/\"")
+        buildConfigField("String", "PAID_MUSIC_API_URL", buildConfigString(paidMusicApiUrl))
     }
 
     signingConfigs {
@@ -103,6 +159,9 @@ dependencies {
 
     // Gson
     implementation("com.google.code.gson:gson:2.11.0")
+
+    // Markdown rendering for legal and informational content
+    implementation("io.noties.markwon:core:4.6.2")
 
     // QR code generation
     implementation("com.google.zxing:core:3.5.3")

@@ -40,7 +40,6 @@ fun QuickListScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(DarkBg)
             .statusBarsPadding()
     ) {
         Row(
@@ -70,7 +69,11 @@ fun QuickListScreen(
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 90.dp),
+                contentPadding = PaddingValues(
+                    start = 20.dp,
+                    end = 20.dp,
+                    bottom = miniPlayerSafeBottomPadding()
+                ),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(state.entries) { entry ->
@@ -103,8 +106,7 @@ private fun QuickEntryRow(
         Box(
             modifier = Modifier
                 .size(56.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(DarkSurface),
+                .glassSurface(RoundedCornerShape(8.dp), elevation = 6.dp),
             contentAlignment = Alignment.Center
         ) {
             if (!entry.imageUrl.isNullOrBlank()) {

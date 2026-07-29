@@ -26,3 +26,6 @@ keystore.properties
 # Temp files
 build_output.txt
 build_errors.txt
+
+# Linglan paid music source credentials
+lx-music-source-paid-*.js

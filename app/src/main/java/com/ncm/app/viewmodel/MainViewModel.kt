@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.ncm.app.NeteaseApp
 import com.ncm.app.data.AppCache
 import com.ncm.app.data.model.*
+import com.ncm.app.data.repository.MusicSourceKeyValidationResult
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,12 +31,20 @@ data class PlaylistDetailUiState(
     val isFullyLoaded: Boolean = false
 )
 
+data class ArtistDetailUiState(
+    val artistId: Long = 0,
+    val artist: ArtistDetail? = null,
+    val isLoading: Boolean = false,
+    val error: String? = null
+)
+
 data class SearchUiState(
     val query: String = "",
     val results: List<Song> = emptyList(),
     val isSearching: Boolean = false,
     val isCommitted: Boolean = false,
-    val history: List<String> = emptyList()
+    val history: List<String> = emptyList(),
+    val isLinglanConfigured: Boolean = false
 )
 
 data class MyUiState(
@@ -70,6 +79,8 @@ class MainViewModel : ViewModel() {
     private val repo = NeteaseApp.instance.repository
     private val session = NeteaseApp.instance.session
     private val cache = NeteaseApp.instance.cache
+    private val musicSourceSettings = NeteaseApp.instance.musicSourceSettings
+    private val musicSourceKeyValidator = NeteaseApp.instance.musicSourceKeyValidator
 
     private val _discoverState = MutableStateFlow(DiscoverUiState())
     val discoverState: StateFlow<DiscoverUiState> = _discoverState
@@ -77,7 +88,15 @@ class MainViewModel : ViewModel() {
     private val _playlistState = MutableStateFlow(PlaylistDetailUiState())
     val playlistState: StateFlow<PlaylistDetailUiState> = _playlistState
 
-    private val _searchState = MutableStateFlow(SearchUiState(history = loadSearchHistory()))
+    private val _artistDetailState = MutableStateFlow(ArtistDetailUiState())
+    val artistDetailState: StateFlow<ArtistDetailUiState> = _artistDetailState
+
+    private val _searchState = MutableStateFlow(
+        SearchUiState(
+            history = loadSearchHistory(),
+            isLinglanConfigured = musicSourceSettings.cardKey.value.isNotBlank()
+        )
+    )
     val searchState: StateFlow<SearchUiState> = _searchState
 
     private val _myState = MutableStateFlow(if (session.isLoggedIn) MyUiState() else MyUiState(isLoading = false))
@@ -94,10 +113,42 @@ class MainViewModel : ViewModel() {
     private var qrPollingJob: Job? = null
 
     private val playlistCache = mutableMapOf<Long, PlaylistDetailUiState>()
+    private val artistDetailCache = mutableMapOf<Long, ArtistDetail>()
     private val quickListCache = mutableMapOf<String, QuickListUiState>()
     private var searchGeneration = 0
 
+    init {
+        viewModelScope.launch {
+            musicSourceSettings.cardKey.collect { key ->
+                _searchState.value = _searchState.value.copy(
+                    isLinglanConfigured = key.isNotBlank()
+                )
+            }
+        }
+    }
+
     fun currentProfile(): UserProfile? = session.profile
+
+    suspend fun validateAndSaveMusicSourceKey(
+        key: String
+    ): MusicSourceKeyValidationResult {
+        val result = musicSourceKeyValidator.validate(key)
+        if (result is MusicSourceKeyValidationResult.Valid) {
+            musicSourceSettings.saveValidatedCardKey(key)
+            musicSourceSettings.completeFirstUsePrompt()
+            repo.onMusicSourceKeyChanged()
+        }
+        return result
+    }
+
+    fun skipFirstUseMusicSourcePrompt() {
+        musicSourceSettings.completeFirstUsePrompt()
+    }
+
+    fun clearMusicSourceKey() {
+        musicSourceSettings.clearCardKey()
+        repo.onMusicSourceKeyChanged()
+    }
 
     fun loadDiscover(force: Boolean = false) {
         val current = _discoverState.value
@@ -174,6 +225,50 @@ class MainViewModel : ViewModel() {
                 }
             }.onFailure { e ->
                 _playlistState.value = PlaylistDetailUiState(isLoading = false, error = e.message, loadedPlaylistId = id)
+            }
+        }
+    }
+
+    fun loadArtistDetail(id: Long, force: Boolean = false) {
+        if (id <= 0) {
+            _artistDetailState.value = ArtistDetailUiState(
+                artistId = id,
+                error = "歌手信息不可用"
+            )
+            return
+        }
+        if (!force) {
+            artistDetailCache[id]?.let { cached ->
+                _artistDetailState.value = ArtistDetailUiState(
+                    artistId = id,
+                    artist = cached
+                )
+                return
+            }
+        }
+        if (_artistDetailState.value.isLoading && _artistDetailState.value.artistId == id) return
+
+        viewModelScope.launch {
+            _artistDetailState.value = ArtistDetailUiState(
+                artistId = id,
+                artist = artistDetailCache[id],
+                isLoading = true
+            )
+            repo.getArtistDetail(id).onSuccess { artist ->
+                artistDetailCache[id] = artist
+                if (_artistDetailState.value.artistId == id) {
+                    _artistDetailState.value = ArtistDetailUiState(
+                        artistId = id,
+                        artist = artist
+                    )
+                }
+            }.onFailure { error ->
+                if (_artistDetailState.value.artistId == id) {
+                    _artistDetailState.value = _artistDetailState.value.copy(
+                        isLoading = false,
+                        error = error.message ?: "歌手信息加载失败"
+                    )
+                }
             }
         }
     }
@@ -257,8 +352,11 @@ class MainViewModel : ViewModel() {
 
     fun clearSearch() {
         searchGeneration++
-        _searchState.value = SearchUiState(
-            history = _searchState.value.history
+        _searchState.value = _searchState.value.copy(
+            query = "",
+            results = emptyList(),
+            isSearching = false,
+            isCommitted = false
         )
     }
 
@@ -477,8 +575,10 @@ class MainViewModel : ViewModel() {
             _loginState.value = LoginUiState()
             _myState.value = MyUiState(isLoading = false)
             playlistCache.clear()
+            artistDetailCache.clear()
             quickListCache.clear()
             _discoverState.value = DiscoverUiState()
+            _artistDetailState.value = ArtistDetailUiState()
             cache.clearUserData()
             repo.logout()
             session.clear()
