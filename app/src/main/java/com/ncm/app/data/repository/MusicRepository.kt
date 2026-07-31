@@ -3,17 +3,21 @@ package com.ncm.app.data.repository
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.util.Base64
+import android.util.Log
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.MultiFormatWriter
+import com.ncm.app.BuildConfig
 import com.ncm.app.data.SessionManager
 import com.ncm.app.data.MusicSourceSettings
 import com.ncm.app.data.api.NeteaseApi
 import com.ncm.app.data.cache.LinglanAudioCache
 import com.ncm.app.data.model.*
+import com.ncm.app.domain.weekly.SimilarSong
+import com.ncm.app.domain.weekly.WeeklyRecommendationSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -34,7 +38,7 @@ class MusicRepository(
     private val session: SessionManager,
     private val linglanAudioCache: LinglanAudioCache,
     private val musicSourceSettings: MusicSourceSettings
-) {
+) : WeeklyRecommendationSource {
 
     private companion object {
         private const val QR_LOGIN_URL_PREFIX = "https://music.163.com/login?codekey="
@@ -99,6 +103,18 @@ class MusicRepository(
             .array("songs")
             .mapNotNull { it.objOrNull()?.toSong() }
     }
+
+    override suspend fun getSimilarSongs(songId: Long): List<SimilarSong> =
+        getSimilarSongsResult(songId).getOrThrow()
+
+    suspend fun getSimilarSongsResult(songId: Long): Result<List<SimilarSong>> = safeCall {
+        val root = api.getSimilarSongs(songId)
+        if (BuildConfig.DEBUG) Log.d("SimiDebug", "similar songs root: $root")
+        parseSimilarSongs(root)
+    }
+
+    override suspend fun getSongDetails(ids: List<Long>): List<Song> =
+        getSongDetail(ids).getOrThrow()
 
     private var unblockManager = UnblockManager(musicSourceSettings)
 
@@ -957,4 +973,39 @@ class MusicRepository(
 
     private fun String.httpsUrl(): String = replaceFirst("http://", "https://")
 
+}
+
+/**
+ * 解析 /api/simi/song 返回的相似歌曲（自包含、不依赖 MusicRepository 私有 helper）。
+ * 字段名以真机抓包为准；若与真实响应不符，按 Task 12 QA 调整此处并重跑
+ * MusicRepositorySimilarSongsTest。
+ */
+internal fun parseSimilarSongs(root: JsonObject): List<SimilarSong> {
+    val songs = root.get("songs")
+    if (songs == null || !songs.isJsonArray) return emptyList()
+    return songs.asJsonArray.mapNotNull { element ->
+        if (!element.isJsonObject) return@mapNotNull null
+        val obj = element.asJsonObject
+        val id = obj.get("id")
+            ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }
+            ?.asJsonPrimitive?.asLong ?: 0L
+        val name = obj.get("name")
+            ?.takeIf { it.isJsonPrimitive }
+            ?.asJsonPrimitive?.asString.orEmpty()
+        val artists = (obj.get("artists")
+            ?.takeIf { it.isJsonArray }
+            ?.asJsonArray ?: JsonArray())
+            .mapNotNull { artistElement ->
+                if (!artistElement.isJsonObject) return@mapNotNull null
+                val artist = artistElement.asJsonObject
+                val artistId = artist.get("id")
+                    ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }
+                    ?.asJsonPrimitive?.asLong ?: 0L
+                val artistName = artist.get("name")
+                    ?.takeIf { it.isJsonPrimitive }
+                    ?.asJsonPrimitive?.asString.orEmpty()
+                if (artistId > 0 && artistName.isNotBlank()) ArtistBrief(artistId, artistName) else null
+            }
+        SimilarSong(id, name, artists).takeIf { it.id > 0 && it.name.isNotBlank() }
+    }
 }

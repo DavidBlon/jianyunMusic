@@ -45,6 +45,11 @@ interface NeteaseApi {
         @Query("ids") ids: String
     ): JsonObject
 
+    @GET("api/simi/song")
+    suspend fun getSimilarSongs(
+        @Query("id") songId: Long
+    ): JsonObject
+
     @GET("api/song/enhance/player/url")
     suspend fun getSongUrl(
         @Query("ids") ids: String,
