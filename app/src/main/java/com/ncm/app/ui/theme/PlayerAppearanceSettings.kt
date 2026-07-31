@@ -90,6 +90,11 @@ class PlayerAppearanceSettings(context: Context) {
     private val _showLyrics = MutableStateFlow(prefs.getBoolean(KEY_SHOW_LYRICS, false))
     val showLyrics: StateFlow<Boolean> = _showLyrics
 
+    private val _rhythmArtworkEnabled = MutableStateFlow(
+        prefs.getBoolean(KEY_RHYTHM_ARTWORK_ENABLED, true)
+    )
+    val rhythmArtworkEnabled: StateFlow<Boolean> = _rhythmArtworkEnabled
+
     fun setLayout(layout: PlayerLayout) {
         prefs.edit().putString(KEY_LAYOUT, layout.name).apply()
         _layout.value = layout
@@ -159,6 +164,11 @@ class PlayerAppearanceSettings(context: Context) {
         _showLyrics.value = showLyrics
     }
 
+    fun setRhythmArtworkEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_RHYTHM_ARTWORK_ENABLED, enabled).apply()
+        _rhythmArtworkEnabled.value = enabled
+    }
+
     fun applyImmersivePreset() {
         updateComponentVisibility(
             PlayerComponentVisibility(
@@ -218,5 +228,6 @@ class PlayerAppearanceSettings(context: Context) {
         const val KEY_VIDEO_POSITION_URI = "video_position_uri"
         const val KEY_VIDEO_POSITION_MS = "video_position_ms"
         const val KEY_SHOW_LYRICS = "show_lyrics"
+        const val KEY_RHYTHM_ARTWORK_ENABLED = "rhythm_artwork_enabled"
     }
 }

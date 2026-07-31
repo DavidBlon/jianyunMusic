@@ -16,7 +16,10 @@ import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.TransferListener
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.session.MediaSession
@@ -46,10 +49,26 @@ object AppPlayer {
     private var currentSong: Song? = null
     private var currentSource: String = "netease"
     private val mediaSnapshots = mutableMapOf<Long, PlaybackSnapshot>()
+    private val rhythmAudioProcessor = RhythmAudioProcessor()
 
     fun player(context: Context): ExoPlayer {
         val appContext = context.applicationContext
         return exoPlayer ?: ExoPlayer.Builder(appContext)
+            .setRenderersFactory(
+                object : DefaultRenderersFactory(appContext) {
+                    override fun buildAudioSink(
+                        context: Context,
+                        enableFloatOutput: Boolean,
+                        enableAudioTrackPlaybackParams: Boolean
+                    ): AudioSink {
+                        return DefaultAudioSink.Builder(context)
+                            .setEnableFloatOutput(false)
+                            .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                            .setAudioProcessors(arrayOf(rhythmAudioProcessor))
+                            .build()
+                    }
+                }
+            )
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .setLoadControl(
                 DefaultLoadControl.Builder()
@@ -68,6 +87,8 @@ object AppPlayer {
             .build()
             .also { exoPlayer = it }
     }
+
+    fun rhythmEnergy(): Float = rhythmAudioProcessor.visualEnergy()
 
     private fun playbackDataSourceFactory(): DataSource.Factory {
         val httpDataSourceFactory = OkHttpDataSource.Factory(playbackHttpClient())

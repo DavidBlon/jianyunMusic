@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.ComponentActivity
@@ -45,6 +46,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -63,10 +65,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.core.content.ContextCompat
 import com.ncm.app.data.update.ApkUpdateInstaller
-import com.ncm.app.data.update.GitHubUpdateChecker
+import com.ncm.app.data.update.AppUpdateChecker
+import com.ncm.app.data.update.InstallResult
 import com.ncm.app.data.update.UpdateInfo
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
@@ -81,6 +85,7 @@ import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.PlayerViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 
 private const val MINI_PLAYER_FADE_MILLIS = 250
 private const val PLAYER_OVERLAY_EXIT_MILLIS = 220
@@ -351,23 +356,33 @@ fun MainApp() {
 private fun AppUpdatePrompt() {
     val context = LocalContext.current
     val installer = remember(context) { ApkUpdateInstaller(context) }
+    val coroutineScope = rememberCoroutineScope()
     var update by remember { mutableStateOf<UpdateInfo?>(null) }
 
     LaunchedEffect(Unit) {
-        val installedVersion = context.packageManager
-            .getPackageInfo(context.packageName, 0)
-            .versionName
-            ?: BuildConfig.VERSION_NAME
-        update = GitHubUpdateChecker.check(installedVersion)
+        update = AppUpdateChecker.check(BuildConfig.VERSION_CODE)
     }
 
     DisposableEffect(installer) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 if (intent.action != DownloadManager.ACTION_DOWNLOAD_COMPLETE) return
-                installer.installIfCurrentDownload(
-                    intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
-                )
+                val downloadId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+                coroutineScope.launch {
+                    when (installer.installIfCurrentDownload(downloadId)) {
+                        InstallResult.VerificationFailed -> Toast.makeText(
+                            context,
+                            "安装包校验失败，请重新下载",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        InstallResult.DownloadUnavailable -> Toast.makeText(
+                            context,
+                            "更新下载失败，请重新下载",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        else -> Unit
+                    }
+                }
             }
         }
         ContextCompat.registerReceiver(
@@ -381,38 +396,59 @@ private fun AppUpdatePrompt() {
 
     update?.let { info ->
         AlertDialog(
-            onDismissRequest = { update = null },
+            onDismissRequest = {
+                if (!info.forceUpdate) update = null
+            },
+            properties = DialogProperties(
+                dismissOnBackPress = !info.forceUpdate,
+                dismissOnClickOutside = !info.forceUpdate
+            ),
             containerColor = GlassSurfaceStrong,
             tonalElevation = 0.dp,
             title = { Text("发现新版本 ${info.versionName}", color = TextPrimary) },
             text = {
                 Text(
-                    "新版本已发布。下载完成后将自动打开系统安装页面。",
+                    info.releaseNotes.ifBlank { "新版本已发布" },
                     color = TextSecondary
                 )
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        if (installer.canInstallPackages()) {
-                            installer.download(info)
-                            update = null
+                        if (!AppUpdateChecker.isHttpsDownloadUrl(info.downloadUrl)) {
+                            Toast.makeText(
+                                context,
+                                "更新下载地址无效",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        } else if (installer.canInstallPackages()) {
+                            runCatching { installer.download(info) }
+                                .onSuccess { update = null }
+                                .onFailure {
+                                    Toast.makeText(
+                                        context,
+                                        "无法开始下载，请稍后重试",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
                         } else {
                             installer.requestInstallPermission()
                         }
                     }
                 ) {
                     Text(
-                        if (installer.canInstallPackages()) "立即更新" else "授权后更新",
+                        "立即更新",
                         color = Green500
                     )
                 }
             },
-            dismissButton = {
-                TextButton(onClick = { update = null }) {
-                    Text("暂不", color = TextSecondary)
+            dismissButton = if (!info.forceUpdate) {
+                {
+                    TextButton(onClick = { update = null }) {
+                        Text("暂不更新", color = TextSecondary)
+                    }
                 }
-            }
+            } else null
         )
     }
 }

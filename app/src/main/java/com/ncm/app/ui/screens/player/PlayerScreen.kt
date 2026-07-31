@@ -48,12 +48,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -61,10 +67,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.ncm.app.ui.theme.*
 import com.ncm.app.NeteaseApp
+import com.ncm.app.playback.AppPlayer
 import com.ncm.app.data.model.PlaybackSource
 import com.ncm.app.data.model.ArtistBrief
 import com.ncm.app.ui.components.ArtistLinks
@@ -74,7 +82,11 @@ import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.PlayMode
 import com.ncm.app.viewmodel.PlaybackQuality
 import com.ncm.app.viewmodel.PlayerViewModel
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.pow
+import kotlin.math.sign
 import kotlin.math.sin
 
 @Composable
@@ -95,6 +107,7 @@ fun PlayerScreen(
     val applyCustomBackgroundGlobally by appearanceSettings.applyCustomBackgroundGlobally.collectAsState()
     val componentVisibility by appearanceSettings.componentVisibility.collectAsState()
     val showLyrics by appearanceSettings.showLyrics.collectAsState()
+    val rhythmArtworkEnabled by appearanceSettings.rhythmArtworkEnabled.collectAsState()
     val useGlobalCustomBackground = applyCustomBackgroundGlobally && customBackground != null
 
     LaunchedEffect(songId) {
@@ -193,18 +206,15 @@ fun PlayerScreen(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null
                     ) { appearanceSettings.setShowLyrics(true) }
-                    if (playerLayout == PlayerLayout.DISC) {
-                        Disc(
-                            coverUrl = state.currentSong?.album?.picUrl,
-                            rotation = rotation,
-                            modifier = coverModifier
-                        )
-                    } else {
-                        AlbumCover(
-                            coverUrl = state.currentSong?.album?.picUrl,
-                            modifier = coverModifier
-                        )
-                    }
+                    RhythmArtwork(
+                        coverUrl = state.currentSong?.album?.picUrl,
+                        layout = playerLayout,
+                        rotation = rotation,
+                        isPlaying = state.isPlaying,
+                        isBuffering = state.isLoading,
+                        enabled = rhythmArtworkEnabled,
+                        modifier = coverModifier
+                    )
                 }
             }
         }
@@ -270,10 +280,12 @@ fun PlayerScreen(
             layout = playerLayout,
             background = playerBackground,
             componentVisibility = componentVisibility,
+            rhythmArtworkEnabled = rhythmArtworkEnabled,
             onDismiss = { bottomPanel = null },
             onLayoutSelected = appearanceSettings::setLayout,
             onBackgroundSelected = appearanceSettings::setBackground,
             onComponentVisibilityChanged = appearanceSettings::setComponentVisible,
+            onRhythmArtworkEnabledChange = appearanceSettings::setRhythmArtworkEnabled,
             onApplyImmersivePreset = appearanceSettings::applyImmersivePreset,
             onResetComponents = appearanceSettings::resetComponentVisibility
         )
@@ -427,9 +439,175 @@ private fun AudioSourceTag(source: String) {
 }
 
 @Composable
+private fun RhythmArtwork(
+    coverUrl: String?,
+    layout: PlayerLayout,
+    rotation: Float,
+    isPlaying: Boolean,
+    isBuffering: Boolean,
+    enabled: Boolean,
+    modifier: Modifier = Modifier
+) {
+    var artworkPulse by remember { mutableFloatStateOf(0f) }
+    var glowPulse by remember { mutableFloatStateOf(0f) }
+    var flowPhase by remember { mutableFloatStateOf(0f) }
+    var burstProgress by remember { mutableFloatStateOf(1f) }
+    var burstStrength by remember { mutableFloatStateOf(0f) }
+    val defaultAccent = Green500
+    var coverAccent by remember(coverUrl) { mutableStateOf(defaultAccent) }
+
+    LaunchedEffect(enabled, isPlaying, isBuffering) {
+        var lastFrameNanos = withFrameNanos { it }
+        var previousRawEnergy = 0f
+        while (enabled && (isPlaying || isBuffering) || artworkPulse > 0.001f || glowPulse > 0.001f) {
+            val frameNanos = withFrameNanos { it }
+            val deltaSeconds = ((frameNanos - lastFrameNanos) / 1_000_000_000f)
+                .coerceIn(0f, 0.05f)
+            lastFrameNanos = frameNanos
+            val target = when {
+                !enabled -> 0f
+                isPlaying -> AppPlayer.rhythmEnergy()
+                isBuffering -> 0.14f
+                else -> 0f
+            }
+            if (enabled && isPlaying && target > 0.42f && target - previousRawEnergy > 0.10f) {
+                burstProgress = 0f
+                burstStrength = target
+            }
+            previousRawEnergy = target
+            if (enabled && (isPlaying || isBuffering)) {
+                flowPhase = (flowPhase + deltaSeconds * (0.16f + target * 0.16f)) % 1f
+            }
+            if (burstProgress < 1f) {
+                burstProgress = (burstProgress + deltaSeconds / 0.92f).coerceAtMost(1f)
+            }
+            val artworkResponse = if (target > artworkPulse) 18f else 7f
+            val glowResponse = if (target > glowPulse) 9f else 3.8f
+            artworkPulse += (target - artworkPulse) *
+                (1f - kotlin.math.exp(-artworkResponse * deltaSeconds))
+            glowPulse += (target - glowPulse) *
+                (1f - kotlin.math.exp(-glowResponse * deltaSeconds))
+        }
+    }
+
+    val artworkScale = 1f + artworkPulse * 0.038f
+    val containerSize = if (layout == PlayerLayout.DISC) 328.dp else 344.dp
+
+    Box(
+        modifier = Modifier.size(containerSize),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.matchParentSize()) {
+            if (!enabled) return@Canvas
+
+            val baseRadius = if (layout == PlayerLayout.DISC) 140.dp.toPx() else 148.dp.toPx()
+            val outerRadius = size.minDimension / 2f - 1.dp.toPx()
+            val expansion = (outerRadius - baseRadius).coerceAtLeast(1.dp.toPx())
+
+            fun fluidRingPath(radius: Float, wobble: Float, phase: Float): Path {
+                val path = Path()
+                val pointCount = 72
+                val shapeExponent = if (layout == PlayerLayout.DISC) 1f else 0.44f
+                repeat(pointCount + 1) { index ->
+                    val angle = index.toFloat() / pointCount * (PI * 2.0).toFloat()
+                    val ripple = sin(angle * 3f + phase * (PI * 2.0).toFloat()) * wobble +
+                        sin(angle * 5f - phase * PI.toFloat()) * wobble * 0.34f
+                    val horizontal = cos(angle)
+                    val vertical = sin(angle)
+                    val x = center.x +
+                        horizontal.sign * abs(horizontal).pow(shapeExponent) * (radius + ripple)
+                    val y = center.y +
+                        vertical.sign * abs(vertical).pow(shapeExponent) * (radius + ripple)
+                    if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                }
+                path.close()
+                return path
+            }
+
+            fun drawSoftRing(progress: Float, alpha: Float, wobble: Float) {
+                if (alpha <= 0.002f) return
+                val radius = baseRadius + expansion * progress
+                val path = fluidRingPath(radius, wobble, progress + flowPhase)
+                val roundedStroke = { width: Float ->
+                    Stroke(width = width, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                }
+                drawPath(
+                    path = path,
+                    color = coverAccent.copy(alpha = alpha * 0.16f),
+                    style = roundedStroke(12.dp.toPx())
+                )
+                drawPath(
+                    path = path,
+                    color = coverAccent.copy(alpha = alpha * 0.38f),
+                    style = roundedStroke(5.dp.toPx())
+                )
+                drawPath(
+                    path = path,
+                    color = coverAccent.copy(alpha = alpha),
+                    style = roundedStroke(1.15.dp.toPx())
+                )
+            }
+
+            drawSoftRing(
+                progress = 0.08f,
+                alpha = 0.10f + glowPulse * 0.18f,
+                wobble = 0.45.dp.toPx() + glowPulse * 0.8.dp.toPx()
+            )
+
+            repeat(3) { index ->
+                val progress = (flowPhase + index / 3f) % 1f
+                val fade = sin(progress * PI.toFloat()).coerceAtLeast(0f).pow(1.25f)
+                drawSoftRing(
+                    progress = progress,
+                    alpha = fade * (0.10f + glowPulse * 0.30f),
+                    wobble = (0.7.dp.toPx() + glowPulse * 1.7.dp.toPx()) * fade
+                )
+            }
+
+            if (burstProgress < 1f) {
+                val easedProgress = 1f - (1f - burstProgress).pow(2.2f)
+                val fade = (1f - burstProgress).pow(1.65f)
+                drawSoftRing(
+                    progress = easedProgress,
+                    alpha = fade * (0.30f + burstStrength * 0.46f),
+                    wobble = (1.2.dp.toPx() + burstStrength * 2.2.dp.toPx()) * fade
+                )
+                drawSoftRing(
+                    progress = (easedProgress * 0.78f).coerceIn(0f, 1f),
+                    alpha = fade * burstStrength * 0.24f,
+                    wobble = 0.8.dp.toPx() * fade
+                )
+            }
+        }
+
+        val pulsingModifier = modifier.graphicsLayer {
+            scaleX = artworkScale
+            scaleY = artworkScale
+            shadowElevation = 18.dp.toPx() + artworkPulse * 18.dp.toPx()
+            shape = if (layout == PlayerLayout.DISC) CircleShape else RoundedCornerShape(28.dp)
+        }
+        if (layout == PlayerLayout.DISC) {
+            Disc(
+                coverUrl = coverUrl,
+                rotation = rotation,
+                onAccentColor = { coverAccent = it },
+                modifier = pulsingModifier
+            )
+        } else {
+            AlbumCover(
+                coverUrl = coverUrl,
+                onAccentColor = { coverAccent = it },
+                modifier = pulsingModifier
+            )
+        }
+    }
+}
+
+@Composable
 private fun Disc(
     coverUrl: String?,
     rotation: Float,
+    onAccentColor: (Color) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -445,7 +623,8 @@ private fun Disc(
                 model = sizedImageUrl(coverUrl, 700),
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
+                contentScale = ContentScale.Crop,
+                onSuccess = { onAccentColor(extractArtworkAccent(it.result.drawable)) }
             )
         }
     }
@@ -454,6 +633,7 @@ private fun Disc(
 @Composable
 private fun AlbumCover(
     coverUrl: String?,
+    onAccentColor: (Color) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -468,10 +648,49 @@ private fun AlbumCover(
                 model = sizedImageUrl(coverUrl, 700),
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
+                contentScale = ContentScale.Crop,
+                onSuccess = { onAccentColor(extractArtworkAccent(it.result.drawable)) }
             )
         }
     }
+}
+
+private fun extractArtworkAccent(drawable: android.graphics.drawable.Drawable): Color {
+    return runCatching {
+        val bitmap = drawable.toBitmap(
+            width = 24,
+            height = 24,
+            config = android.graphics.Bitmap.Config.ARGB_8888
+        )
+        var red = 0.0
+        var green = 0.0
+        var blue = 0.0
+        var totalWeight = 0.0
+        val hsv = FloatArray(3)
+        for (y in 0 until bitmap.height) {
+            for (x in 0 until bitmap.width) {
+                val pixel = bitmap.getPixel(x, y)
+                android.graphics.Color.colorToHSV(pixel, hsv)
+                val saturation = hsv[1]
+                val value = hsv[2]
+                if (value < 0.12f || value > 0.94f) continue
+                val weight = (0.25f + saturation * 1.5f).toDouble()
+                red += android.graphics.Color.red(pixel) * weight
+                green += android.graphics.Color.green(pixel) * weight
+                blue += android.graphics.Color.blue(pixel) * weight
+                totalWeight += weight
+            }
+        }
+        if (totalWeight == 0.0) {
+            DefaultGreen500
+        } else {
+            Color(
+                red = (red / totalWeight / 255.0).toFloat(),
+                green = (green / totalWeight / 255.0).toFloat(),
+                blue = (blue / totalWeight / 255.0).toFloat()
+            )
+        }
+    }.getOrDefault(DefaultGreen500)
 }
 
 @Composable
@@ -950,10 +1169,12 @@ private fun AppearanceSheet(
     layout: PlayerLayout,
     background: PlayerBackground,
     componentVisibility: PlayerComponentVisibility,
+    rhythmArtworkEnabled: Boolean,
     onDismiss: () -> Unit,
     onLayoutSelected: (PlayerLayout) -> Unit,
     onBackgroundSelected: (PlayerBackground) -> Unit,
     onComponentVisibilityChanged: (PlayerComponent, Boolean) -> Unit,
+    onRhythmArtworkEnabledChange: (Boolean) -> Unit,
     onApplyImmersivePreset: () -> Unit,
     onResetComponents: () -> Unit
 ) {
@@ -1013,6 +1234,11 @@ private fun AppearanceSheet(
                     )
                 }
             }
+            RhythmArtworkToggleRow(
+                checked = rhythmArtworkEnabled,
+                onCheckedChange = onRhythmArtworkEnabledChange,
+                modifier = Modifier.padding(top = 12.dp)
+            )
             AppearanceSectionTitle("氛围动效", modifier = Modifier.padding(top = 24.dp))
             PlayerBackground.entries.chunked(2).forEach { row ->
                 Row(
@@ -1031,6 +1257,46 @@ private fun AppearanceSheet(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RhythmArtworkToggleRow(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(DarkSurface2)
+            .clickable { onCheckedChange(!checked) }
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(
+                "节奏律动",
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextPrimary,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                "大封面和取色光晕跟随音乐低频",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextTertiary,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.White,
+                checkedTrackColor = Green500
+            )
+        )
     }
 }
 
