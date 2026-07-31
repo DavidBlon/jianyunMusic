@@ -1,7 +1,7 @@
 # 每周推荐歌单 —— 设计文档（修订 v3）
 
 日期：2026-07-31
-状态：已并入 v3 + 第 4~9 轮修订（缓存策略 / 缓存字段补全 / 水合规则 / 单飞 key+scope+invokeOnCompletion 清理 / domain 结果层 / 清理器职责与锁边界 / 周归属 / 去重边 / 序列化 / 防御性检查 / 日志改 Room / 账号切换保留数据 / Double 公式 / 详情乱序恢复 / 前置验证 / SQL 聚合 / 每用户 2000 上限 / 自然日 cutoff / suspend 清理与退出登录 / 精简事件字段 / withTransaction 事务 / 重抛 CancellationException / accumulatedPlayedMs / 全局启动清理 / 最优排名去重 / Room 升级清单），待用户最终确认
+状态：已并入 v3 + 第 4~10 轮修订（缓存策略 / 缓存字段补全 / 水合规则 / 单飞 key+scope+invokeOnCompletion 清理 / domain 结果层 / 清理器职责与锁边界 / 周归属 / 去重边 / 序列化 / 防御性检查 / 日志改 Room / 账号切换保留数据 / Double 公式 / 详情乱序恢复 / 前置验证 / SQL 聚合 / 每用户 2000 上限 / 自然日 cutoff / suspend 清理与退出登录 / 精简事件字段 / withTransaction 事务 / 重抛 CancellationException / accumulatedPlayedMs / 全局启动清理 / 最优排名去重 / Room 升级清单 / TimeoutCancellationException 先于取消捕获 / 退出登录取消先于清理 / sessionGeneration 写回校验 / 歌手上限两轮完整选择 / coScore = 3×(coOccurrence-1) / ClearWeeklyDataResult 不裸 check / 进度跳变不计入累计），待用户最终确认
 
 ## 1. 目标
 
@@ -15,15 +15,16 @@
 | 算法主干 | **相似歌曲聚合** |
 | 数据窗口 | **上一个完整自然周**（设备本地时区），本周首次打开时生成 |
 | 架构 | **方案 A**：独立周播放日志 + 纯 Kotlin 算法 + **UseCase 编排**（算法不碰网络） |
-| 有效播放 | `accumulatedPlayedMs >= 30 秒` **或**（`durationMs > 0` 且 `>= 50%`，防除零）；`accumulatedPlayedMs` = **实际累计播放时长**（非进度条位置：拖动不计、暂停不计、每会话清零）；跨会话重复播放累计，同一会话去重 |
+| 有效播放 | `accumulatedPlayedMs >= 30 秒` **或**（`durationMs > 0` 且 `>= 50%`，防除零）；`accumulatedPlayedMs` = **实际累计播放时长**（非进度条位置：拖动不计、暂停不计、seek / 媒体切换 / 进度异常跳变不计、每会话清零）；跨会话重复播放累计，同一会话去重 |
 | 播放日志存储 | **Room（SQLite）**：唯一索引 `(userId, playbackSessionId)` 会话去重；SQL 删 14 个本地自然日前（ZoneId cutoff）；App 启动**全局**清理所有用户（§11.2）；**SQL 聚合**出上周 `(songId, playCount, lastPlayedAt)`；每用户 2000 上限（§5、§11.2） |
 | 进程模型 | 播放服务与 App **同进程**（Manifest 无 `android:process`，已核实），无跨进程写覆盖风险 |
 | 周归属 | 播放事件按 **`sessionStartedAt`**（会话开始时间）归属周，跨周播放归入开始所在周 |
 | 周标识 | 用**周一 LocalDate**（如 `"2026-07-27"`）做缓存键，不用 `yyyy-Www` 字符串 |
-| 单飞 | **仅 UseCase 一处**持锁（Mutex **只保护任务查找/创建**，await 在锁外；**应用级注入 Scope**；按 `GenerationKey(userId + displayWeekStart)` 区分，异 key **取消旧任务**；单飞引用由 Deferred `invokeOnCompletion` 在任务**真正完成**时清理，**调用方取消不清**），ViewModel 不重复防重 |
+| 单飞 | **仅 UseCase 一处**持锁（Mutex **只保护任务查找/创建**，await 在锁外；**应用级注入 Scope**；按 `GenerationKey(userId + displayWeekStart)` 区分，异 key **取消旧任务**；单飞引用由 Deferred `invokeOnCompletion` 在任务**真正完成**时清理，**调用方取消不清**；提供 `cancelGenerationForUser` 供退出登录**先取消再清数据**），ViewModel 不重复防重 |
 | 序列化 | 周推荐缓存用 **kotlinx.serialization**（sealed interface + `resultType` 判别符 + `ignoreUnknownKeys`）；播放日志走 Room **无需序列化**（§11.7） |
 | 账号切换 | **保留旧账号本地数据**（缓存按 userId 隔离），仅取消旧账号在途任务；**明确退出登录**才按隐私策略清除 |
-| 并发与超时 | 相似接口并发 ≤ 4、单请求超时 8s；**接口失败必须重抛 `CancellationException`**（`runCatching` 会吞掉取消，已取消的旧任务要继续真正停止） |
+| 退出登录 | **严格顺序**：① `authSession.invalidate()`（`sessionGeneration` +1）→ ② `cancelGenerationForUser(userId)` 取消并等待在途任务 → ③ `clearWeeklyUserData`（Room 删日志 + `commit()` 删缓存，返回 `ClearWeeklyDataResult`，**不裸 check**）→ ④ `finishLogout()`；写缓存前校验 `sessionGeneration` 一致（§7、§11.5） |
+| 并发与超时 | 相似接口并发 ≤ 4、单请求超时 8s；**`TimeoutCancellationException` 先捕获**（单请求超时只跳过该种子）、再捕获 `CancellationException` **重抛**（整体取消）、其他异常跳过（`runCatching` 会吞掉取消，禁止用于网络/协程代码） |
 
 ## 3. 组件划分
 
@@ -136,10 +137,15 @@ sealed interface WeeklyRecUiState {
 - **写入条件**：播放进度首次跨过以下任一阈值（先达者，**含等号**，刚好 30 秒也计入）；**合格判定由播放层完成**，判定通过后向 WeeklyPlayLog 落库**已合格事件**；`qualifiedAt` 不持久化（推荐算法只需要 `sessionStartedAt`）：
   ```kotlin
   // 关键：playedMs 必须是**实际累计播放时长**，不是播放器当前进度 currentPosition
-  val accumulatedPlayedMs: Long
+  var accumulatedPlayedMs = 0L
   // 只在播放器处于**实际播放状态**时累计；不含暂停时间；
   // 拖动进度条不直接增加（否则拖到 90% 立即满足 50% 条件，被误判有效播放）；
   // 每次播放会话开始时清零；推荐按实际媒体播放增量累计（而非现实时间，避免变速播放误差）
+  // 进度**大幅跳变不计入**：seek、媒体切换、网络恢复后播放器重同步进度，都会产生异常大增量
+  val delta = currentPosition - previousPosition
+  if (isPlaying && !isSeeking && delta in 0..MAX_REASONABLE_POSITION_DELTA) {
+      accumulatedPlayedMs += delta
+  }
   val qualified =
       accumulatedPlayedMs >= 30_000 ||
       (durationMs > 0 &&                       // 防除零：durationMs 未知（0）时只看时长阈值
@@ -270,7 +276,7 @@ data class CandidateEdge(
 | 种子权重 | `seedWeight = if (maxSeedScore > 0.0) seedScore / maxSeedScore else 0.0`（对已选种子归一化；**全程 Double**，∈ [0,1]，**防除零**） |
 | 单边贡献 | `contribution = seedWeight * (SIM_LIMIT - simRank + 1)`（SIM_LIMIT = 10） |
 | 候选相似分 | `simScore = Σ contribution`（跨所有种子累加） |
-| 共同推荐 | `coOccurrence` = 推荐该候选的**不同种子数**——**按候选歌曲 `candidateSongId` 分组后在该组内**统计 `seedSongId.distinct().size`，不是对全部边统一统计；`coScore = 3 * coOccurrence` |
+| 共同推荐 | `coOccurrence` = 推荐该候选的**不同种子数**——**按候选歌曲 `candidateSongId` 分组后在该组内**统计 `seedSongId.distinct().size`，不是对全部边统一统计；`coScore = 3 * (coOccurrence - 1)`——只有被**多颗**种子共同推荐的候选才额外加分（所有候选至少来自一颗种子，单来源的固定 +3 对排序无实际意义；两公式相对差距相同，不影响排序，但语义更清晰：coOccurrence 1/2/3 → 0/3/6） |
 | 候选总分 | `totalScore = simScore + coScore` |
 
 **处理步骤**：
@@ -283,7 +289,13 @@ data class CandidateEdge(
    ```
    防止虚增 `simScore` / 排名贡献 / 错误影响共同推荐。
 2. 剔除 `listenedSongIds`（数据周已听歌曲）。
-3. **歌手上限按 `primaryArtistId`**（歌曲歌手列表第一位）计算，合作歌曲只占用第一位歌手的配额，避免过度过滤。上限：优先 3 首，结果 < 30 时放宽到 **5 首**（**不再放宽到 10**；允许不足 30 时展示实际数量）。
+3. **歌手上限按 `primaryArtistId`**（歌曲歌手列表第一位）计算，合作歌曲只占用第一位歌手的配额，避免过度过滤。上限：优先 3 首，结果 < 30 时放宽到 **5 首**（**不再放宽到 10**；允许不足 30 时展示实际数量）。**放宽用两轮完整选择，不做"追加"**——第二轮从**完整排序候选重新选择**，否则会破坏整体推荐顺序：
+   ```kotlin
+   val firstPass = selectWithArtistLimit(rankedCandidates, artistLimit = 3, totalLimit = 30)
+   val finalResult =
+       if (firstPass.size >= 30) firstPass
+       else selectWithArtistLimit(rankedCandidates, artistLimit = 5, totalLimit = 30)
+   ```
 4. 目标 30 首（软上限）；**不足 30 时返回实际数量，不凑数**。
 5. **同分稳定排序**：`coOccurrence` 降序 → `simScore` 降序 → `Σ simRank` 升序 → `songId` 升序（确定性平局决胜）。
 
@@ -345,6 +357,23 @@ suspend fun execute(key: GenerationKey): WeeklyRecResult {
 - **清理时机**：由 Deferred 的 `invokeOnCompletion` 在任务**真正完成**（成功 / 失败 / 被异 key 取消）后清除单飞引用；守卫 `inFlight === newTask` 防旧任务结束误清新任务。
 - **调用方取消 ≠ 任务取消**：页面离开只取消自己的 `await`，共享任务继续运行；同 key 再次进入仍复用同一任务，**不会并发生成**。
 - **ViewModel 不再实现第二套防重**，只调用并接收状态。
+- **退出登录竞态保护**：后台生成任务可能与退出清理并发——若"删数据后、账号态切换前"任务完成并通过校验，会把缓存回写。UseCase 提供取消入口，退出登录**必须先取消再清数据**（完整顺序见 §11.5）：
+  ```kotlin
+  suspend fun cancelGenerationForUser(userId: Long) {
+      val task = mutex.withLock {
+          if (inFlightKey?.userId == userId) {
+              inFlight?.also {
+                  inFlight = null
+                  inFlightKey = null
+              }
+          } else {
+              null
+          }
+      }
+      task?.cancelAndJoin()          // 等待任务真正取消完成，再执行后续删除
+  }
+  ```
+- **会话版本 `sessionGeneration`**：由认证会话维护、登录/退出时**单调递增**的版本号；`generate()` 开始时快照 `generationSessionGeneration = sessionGeneration`，写缓存前校验 `currentSessionGeneration == generationSessionGeneration`（流程步骤 10）——防止"退出后快速重登，旧任务把结果写进新会话"。
 
 **流程**：
 ```
@@ -358,19 +387,20 @@ suspend fun execute(key: GenerationKey): WeeklyRecResult {
 5. 对数据周全部不同歌曲算 preliminaryScore → 水合歌手信息（≤ 100 首拉全部，> 100 首取 Top 20，见 §6.1；每批 ≤ 50）
 6. selectSeeds → 多样化 Top 8 种子（同 primaryArtistId ≤ 2）
 7. 对每颗种子调 getSimilarSongs（每颗取 10）：
-   - 并发 ≤ 4（Semaphore），单请求超时 8s；部分种子失败 → 跳过继续（**实现见下方"部分接口失败必须重抛 CancellationException"**）
-8. rankCandidates → 聚合、去重、剔除数据周已听、primaryArtistId 上限（3→5）、排序
+   - 并发 ≤ 4（Semaphore），单请求超时 8s；部分种子失败 → 跳过继续（**实现见下方"接口失败处理"**）
+8. rankCandidates → 聚合、去重、剔除数据周已听、primaryArtistId 上限两轮完整选择（3 → 不足 30 重选 5）、排序
 9. 候选 = 0 → Failure（不缓存）；否则 getSongDetail 取最终详情：
    **全部失败 → Failure（不缓存）；部分失败 → 丢弃失败歌曲，保留成功歌曲继续**
    → **恢复推荐顺序**：`detailById = details.associateBy { it.id }`，再 `rankedCandidateIds.mapNotNull { detailById[it] }`（详情接口返回乱序不影响最终列表顺序）
    → 转 `CachedSong` 轻量字段
 10. 写缓存前再次校验：
-    currentUserId == generationUserId && currentDisplayWeekStart == generationDisplayWeekStart && coroutineContext.isActive
-    不满足则放弃写入（防账号切换竞态回写旧账号缓存）
+    currentUserId == generationUserId && currentSessionGeneration == generationSessionGeneration &&
+    currentDisplayWeekStart == generationDisplayWeekStart && coroutineContext.isActive
+    不满足则放弃写入（防账号切换竞态 / 退出后重登旧任务回写新会话）
 11. 写缓存（Success）：**覆盖同一 key `weekly_rec:{userId}`**（每用户仅一份，不按周新增 key）→ 返回 Success(songs, seedCount, displayWeekStart)
 ```
 
-**部分接口失败必须重抛 CancellationException**（单颗种子失败跳过、异 key 取消旧任务、部分详情失败继续——都**不得用 `runCatching` 吞掉取消**）：
+**接口失败处理（超时 ≠ 取消，必须分开捕获）**：单颗种子失败跳过、异 key 取消旧任务、部分详情失败继续——都**不得用 `runCatching` 吞掉取消**：
 ```kotlin
 supervisorScope {
     seeds.map { seed ->
@@ -378,17 +408,21 @@ supervisorScope {
             semaphore.withPermit {
                 try {
                     withTimeout(8_000) { api.getSimilarSongs(seed.songId) }   // 单请求超时 8s
+                } catch (e: TimeoutCancellationException) {
+                    null                                                     // **超时**：只跳过该种子，继续生成
                 } catch (e: CancellationException) {
-                    throw e                                                  // **必须重抛**：旧任务被取消时要真正停止
+                    throw e                                                  // **整体取消**（账号切换等）：必须继续向上传递
                 } catch (e: Exception) {
-                    null                                                     // 普通失败：跳过该种子
+                    null                                                     // 普通网络/解析失败：跳过该种子
                 }
             }
         }
     }.awaitAll()
 }
 ```
-- `runCatching { ... }.getOrNull()` **禁止用于网络/协程代码**（它同样捕获 `CancellationException`，会导致已取消的旧任务继续执行网络请求、算法与水合流程）；`getSongDetail` 详情水合同样按此模式处理。
+- **`TimeoutCancellationException` 必须放在 `CancellationException` 前面**：它继承自 `CancellationException`，若先捕获取消，单请求超时会被当作整体取消重新抛出 → 整次推荐生成失败，而不是只跳过这一颗种子。
+- `getSongDetail` 详情水合同样规则：`TimeoutCancellationException` → 丢弃该首；`CancellationException` → 重抛；其他异常 → 丢弃该首。
+- `runCatching { ... }.getOrNull()` **禁止用于网络/协程代码**（它同样捕获 `CancellationException`，会导致已取消的旧任务继续执行网络请求、算法与水合流程）。
 
 ## 8. 更新机制（固定周一 · 用上周数据）
 
@@ -468,19 +502,46 @@ suspend fun cleanupWeeklyCache(userId: Long, now: Long)
 
 **调用时机（应用级事件触发，不挂到每次 record/read）**：
 - **打开推荐页面**：进入 MyScreen 触发一次完整清理；
-- **退出登录（隐私清除，suspend 等待成功）**：播放日志（Room）与周推荐缓存（SharedPreferences）均为持久化，须**等待数据库删除成功后再完成退出**，不启动无管理的后台协程。新增独立方法：
+- **退出登录（隐私清除，suspend 等待成功）**：播放日志（Room）与周推荐缓存（SharedPreferences）均为持久化，须**等待数据库删除成功后再完成退出**，不启动无管理的后台协程。**严格顺序（防后台任务回写竞态）**：
+  1. `authSession.invalidate()`——**立即**标记登录会话失效（`sessionGeneration` +1）；
+  2. `weeklyRecommendationUseCase.cancelGenerationForUser(userId)`——**先取消**该用户在途生成任务并 `cancelAndJoin()` **等待真正取消完成**；
+  3. `clearWeeklyUserData(userId)`——删除 Room 播放日志 + `commit()` 删除 `weekly_rec:{userId}`；
+  4. `accountManager.finishLogout()`——完成账号态切换。
+  **顺序不可调换**：若先删数据再取消任务，后台任务可能在删除后、账号态切换前完成并通过校验回写缓存。新增独立方法：
   ```kotlin
-  suspend fun clearWeeklyUserData(userId: Long) {
-      weeklyPlayLogStorage.deleteAllByUser(userId)      // Room：DELETE FROM weekly_play_event WHERE userId = :userId
+  data class ClearWeeklyDataResult(
+      val roomCleared: Boolean,
+      val recommendationCacheCleared: Boolean
+  ) {
+      val success: Boolean get() = roomCleared && recommendationCacheCleared
+  }
+
+  suspend fun clearWeeklyUserData(userId: Long): ClearWeeklyDataResult {
+      // Room：DELETE FROM weekly_play_event WHERE userId = :userId
+      val roomCleared = try {
+          weeklyPlayLogStorage.deleteAllByUser(userId)
+          true
+      } catch (e: CancellationException) {
+          throw e
+      } catch (e: Exception) {
+          Log.e(TAG, "删除播放日志失败", e)
+          false
+      }
       // SharedPreferences 清除必须**真正落盘**：apply() 只异步提交，不能保证写入磁盘；
       // 隐私清除用 commit()（同步）并检查返回值。普通每周缓存写入仍可继续用 apply()。
-      val removed = withContext(Dispatchers.IO) {
-          sharedPreferences.edit().remove("weekly_rec:$userId").commit()
+      var removed = false
+      var attempts = 0
+      while (!removed && attempts < 2) {                 // 失败**最少重试一次**（共至多 2 次）
+          removed = withContext(Dispatchers.IO) {
+              sharedPreferences.edit().remove("weekly_rec:$userId").commit()
+          }
+          attempts++
       }
-      check(removed) { "退出登录时清除 weekly_rec:$userId 失败" }
+      if (!removed) Log.e(TAG, "清除 weekly_rec:$userId 失败")
+      return ClearWeeklyDataResult(roomCleared, removed)
   }
   ```
-  由退出登录流程在账号态切换前调用并 await；原"移除两个 weekly key"的同步逻辑已过时并取消。
+  **不使用裸 `check()`**（抛异常会让退出登录流程异常甚至 App 崩溃）；Room 与 SharedPreferences 是两套存储，无法组成真正的跨存储事务，故由退出流程依据返回值决策：失败时记录日志、UI 提示"部分本地数据清理失败"，**不阻断退出**。由退出登录流程在账号态切换前调用并 await；原"移除两个 weekly key"的同步逻辑已过时并取消。
 - **账号切换**：**保留旧账号数据**（不同 userId key 天然隔离，无混用；隐私策略只在**退出登录**时清除，切换不清）；旧账号在途生成任务因 **key 变化**由 UseCase 单飞取消（见 §7）；
 - **App 启动维护**：启动时**全局**清理（`deleteAllUsersOlderThan` 删**所有用户** 14 个本地自然日前日志，含未激活旧账号；并清理当前账号的无效周推荐缓存），兜底过期数据。
 - 周推荐生成流程读缓存时命中无效缓存即删（§7 步骤 2，属 Store 自身职责，**不计入** Cleaner 调用点）。
@@ -524,6 +585,7 @@ suspend fun cleanupWeeklyCache(userId: Long, now: Long)
 
 - `WeeklyPlayLogTest`（Room 内存库）：
   - **播放层合格判定**（独立谓词）：`>= 30s` / `>= 50%`（含恰好 30 秒计入）
+  - **`accumulatedPlayedMs` 只在播放中累加**：暂停 / seek / 媒体切换 / 进度异常跳变（delta 越界或 `!isPlaying` / `isSeeking`）不计入
   - **`durationMs = 0` 时不除零**，只采用 30 秒规则
   - **跨会话重复播放可累计**（同歌多次播放 → `queryWeeklyStats` 的 `playCount` 递增）
   - **同一 playbackSessionId 重复回调去重**（唯一索引 `INSERT OR IGNORE`，只一行；`insert` 返回 -1）
@@ -537,13 +599,14 @@ suspend fun cleanupWeeklyCache(userId: Long, now: Long)
   - **`deleteAllUsersOlderThan(cutoff)`**：一次删除**所有用户** cutoff 前日志（App 启动维护用）
 - `WeeklyRecommendationAlgorithmTest`（纯 JVM）：
   - `selectSeeds`：播放次数加权、最近播放加权（**全程 Double，`coerceIn(0.0, 1.0)`**）、同 `primaryArtistId` ≤ 2、种子封顶 8、**空输入 → 空列表**（不产生 UI 状态）
-  - `rankCandidates`：种子权重影响得分（高频种子贡献更大；**`maxSeedScore` 为 0 → `seedWeight = 0.0` 防除零**）、共同推荐加分、相似排名影响、剔除已听、`primaryArtistId` 上限 **3 → 5**（不含 10）、候选 < 30 返回实际数量、**所有候选都已听过 → 空**、**同分歌曲排序稳定**、合作歌曲只占第一位歌手配额
+  - `rankCandidates`：种子权重影响得分（高频种子贡献更大；**`maxSeedScore` 为 0 → `seedWeight = 0.0` 防除零**）、共同推荐加分（**`coScore = 3 × (coOccurrence - 1)`：单来源 0 分、双来源 3 分、三来源 6 分**）、相似排名影响、剔除已听、`primaryArtistId` 上限 **3 → 5**（不含 10）、**放宽为两轮完整选择**（第一轮 3 首 < 30 → 第二轮从**完整排序候选**重选 5 首，非追加；>= 30 用第一轮）、候选 < 30 返回实际数量、**所有候选都已听过 → 空**、**同分歌曲排序稳定**、合作歌曲只占第一位歌手配额
   - **非法边过滤**：`candidateSongId <= 0` / `simRank` 越界 / `primaryArtistId` 无效 / `candidateSongId == seedSongId` 被剔除
   - **重复边去重（保留最优排名）**：同 `seedSongId + candidateSongId` 重复时**只保留 `simRank` 最小那条**（rank 2 与 rank 8 重复 → 取 rank 2），不重复加分；`coOccurrence` 按候选**分组内**的**不同种子数**统计
 - `GenerateWeeklyRecommendationUseCaseTest`：
   - **不同歌曲数 < 2（即使播放 20 次同一首）→ InsufficientData**
   - 部分种子接口失败 → 继续生成
   - **接口失败重抛 CancellationException**：已取消的旧任务真正停止（不吞掉取消继续执行网络/算法）；普通失败才跳过
+  - **超时 ≠ 取消**：`TimeoutCancellationException` 先捕获只跳过该种子，**不**当作整体取消重抛（8s 超时不会让整次生成失败）
   - 候选不足 30 → 实际数量
   - **部分歌曲详情失败 → 丢弃失败歌曲，剩余正常展示并缓存；全部失败 → Failure**
   - **详情返回乱序 → 用 `associateBy` + `mapNotNull` 恢复推荐顺序**（列表顺序 = 推荐排序，与详情接口返回顺序无关）
@@ -554,6 +617,7 @@ suspend fun cleanupWeeklyCache(userId: Long, now: Long)
   - **Mutex 不长时间占用**：锁只保护任务查找/创建，await 在锁外（锁竞争微秒级）
   - **Scope 由应用级注入**：调用方取消自己的 job 不影响共享的 inFlight 任务
   - 生成期间切换账号 → 在途取消且不写回旧账号缓存
+  - **退出登录竞态**：`cancelGenerationForUser(userId)` 先取消并 `cancelAndJoin` 再清数据；`sessionGeneration` 不一致 → 放弃写缓存（退出后快速重登，旧任务不回写新会话）
   - **周边界用 atStartOfDay(zoneId) 而非固定毫秒（含夏令时用例）**
 - `WeeklyRecommendationStoreTest`：
   - **周日 23:59 与周一 00:00 边界**
@@ -572,7 +636,8 @@ suspend fun cleanupWeeklyCache(userId: Long, now: Long)
   - **suspend** `cleanupWeeklyCache` 删除 14 个本地自然日前播放日志（**唯一入口：`WeeklyPlayLog.pruneExpired(userId, now)`，不直接操作 Storage、不调用 `read()`**）
   - 删除无效 / 版本过期的周推荐缓存
   - 清理后每用户周推荐 key 恰好一份
-  - 退出登录 → **suspend `clearWeeklyUserData(userId)` 等待 Room 删除成功后再完成退出**：Room 中该用户记录为空 且 `weekly_rec:{userId}` 不存在
+  - 退出登录 → **严格顺序**：先 `authSession.invalidate()` → `cancelGenerationForUser`（cancelAndJoin 等待）→ suspend `clearWeeklyUserData(userId)` → `finishLogout()`；Room 中该用户记录为空 且 `weekly_rec:{userId}` 不存在
+  - **`clearWeeklyUserData` 失败不崩溃**：返回 `ClearWeeklyDataResult`；SharedPreferences `commit()` 失败**重试一次**后仍失败 → 记日志、UI 提示"部分本地数据清理失败"，**不裸 `check()` 抛异常**
   - **账号切换 → 不清除旧账号数据**（保留，key 隔离）；**App 启动 → 全局 `deleteAllUsersOlderThan` 删所有用户过期日志**（含未激活旧账号）
   - **不产生递归**：Cleaner 清理日志时不会触发 `WeeklyPlayLog.read()`
 
@@ -580,14 +645,14 @@ suspend fun cleanupWeeklyCache(userId: Long, now: Long)
 
 ```
 播放达到有效条件后记录事件（accumulatedPlayedMs >= 30s 或 >=50% 且防除零，合格判定在播放层；accumulatedPlayedMs = 实际累计播放时长，非进度条位置、拖动不计；落库已合格事件，不含该字段；Room 唯一索引 (userId, playbackSessionId) INSERT OR IGNORE 去重、跨会话按行累计；insertAndPrune（database.withTransaction）内 deleteOlderThan 14 个本地自然日前，不回调 Cleaner；每用户 2000 上限，超限 deleteOldest）
-→ 本周首次打开页面（触发 Cleaner 应用级清理；Cleaner 清日志只能走 WeeklyPlayLog.pruneExpired(userId, now) 唯一入口；App 启动走全局 deleteAllUsersOlderThan 覆盖旧账号；退出登录走 suspend clearWeeklyUserData，SharedPreferences 用 commit() 落盘）
+→ 本周首次打开页面（触发 Cleaner 应用级清理；Cleaner 清日志只能走 WeeklyPlayLog.pruneExpired(userId, now) 唯一入口；App 启动走全局 deleteAllUsersOlderThan 覆盖旧账号；退出登录严格顺序：authSession.invalidate() → cancelGenerationForUser（cancelAndJoin 等待）→ clearWeeklyUserData（返回 ClearWeeklyDataResult，SharedPreferences 用 commit()）→ finishLogout）
 → 读取上一个完整自然周的播放记录（queryWeeklyStats SQL 聚合出 (songId, playCount, lastPlayedAt)；distinctSongCount = size、validPlayCount = playCount 求和；周归属按 sessionStartedAt；周边界用 atStartOfDay(zoneId).toInstant()，不用固定毫秒；周一日期作周键）
 → 先算初步分（次数 0.7 + 新鲜度 0.3，全程 Double：toDouble() / coerceIn(0.0, 1.0)，seedWeight 防除零）→ 水合歌手信息（≤100 首拉全部，>100 首取 Top 20）
 → 选择多样化 Top 8 种子（同歌手 ≤ 2）
-→ 并发获取相似歌曲（≤ 4 并发、单请求超时；supervisorScope + async，CancellationException 必须重抛、普通失败跳过；UseCase 按 GenerationKey 单飞：应用级注入 Scope，Mutex 只保护任务查找，await 在锁外，异 key 取消旧任务，单飞引用由 invokeOnCompletion 在任务真正完成时清理）
-→ 候选过滤非法边 + 去重（seedSongId+candidateSongId，重复边保留 simRank 最小那条）→ 种子加权聚合（coOccurrence 按候选分组内不同种子数统计）、剔除上周已听、primaryArtistId 上限（3→5）
+→ 并发获取相似歌曲（≤ 4 并发、单请求超时；supervisorScope + async，TimeoutCancellationException 先捕获只跳过该种子、CancellationException 重抛、其他异常跳过；UseCase 按 GenerationKey 单飞：应用级注入 Scope，Mutex 只保护任务查找，await 在锁外，异 key 取消旧任务，单飞引用由 invokeOnCompletion 在任务真正完成时清理，退出用 cancelGenerationForUser）
+→ 候选过滤非法边 + 去重（seedSongId+candidateSongId，重复边保留 simRank 最小那条）→ 种子加权聚合（coOccurrence 按候选分组内不同种子数统计，coScore = 3 × (coOccurrence - 1)）、剔除上周已听、primaryArtistId 上限两轮完整选择（3 首 → 不足 30 从完整排序候选重选 5 首）
 → 获取歌曲详情（部分失败丢弃，全部失败 Failure）→ associateBy + mapNotNull 恢复推荐顺序 → 转轻量 CachedSong
-→ 写缓存前校验身份（含 sourceWeekStart 一致）→ 覆盖式缓存（单 key、schemaVersion + 周一日期键 + sealed 结果 + kotlinx.serialization，持久化类全 @Serializable，存储封装分离；无效缓存即删）
+→ 写缓存前校验身份（userId + sessionGeneration + displayWeekStart + sourceWeekStart + isActive 一致）→ 覆盖式缓存（单 key、schemaVersion + 周一日期键 + sealed 结果 + kotlinx.serialization，持久化类全 @Serializable，存储封装分离；无效缓存即删）
 → UseCase 返回 WeeklyRecResult → ViewModel 映射 UI 状态 → 展示实际生成数量
 ```
 
