@@ -1,7 +1,7 @@
 # 每周推荐歌单 —— 设计文档（修订 v3）
 
 日期：2026-07-31
-状态：已获用户批准（含 v3 全部修订意见）
+状态：已并入 v3 全部修订 + 第 4 轮缓存策略修订，待用户最终确认
 
 ## 1. 目标
 
@@ -31,6 +31,7 @@
 | `GenerateWeeklyRecommendationUseCase` | domain | 编排全部 I/O；**唯一**的单飞控制点 |
 | `NeteaseApi.getSimilarSongs` | api | 新增"相似歌曲"接口（真实路径实现时真机验证） |
 | `WeeklyRecommendationStore` | data | 缓存（`schemaVersion` + 周一日期键 + sealed 结果），处理损坏/账号切换/跨年 |
+| `WeeklyCacheCleaner` | data | 统一清理：14 天前播放日志 + 无效/过期周推荐缓存，保证每用户仅一份（§11.5） |
 | `MainViewModel.weeklyRecState` | viewmodel | 暴露 `sealed` UI 状态，仅调用 UseCase 并接收状态 |
 | `WeeklyRecommendationRow` + `WeeklyRecommendationScreen` | ui | "我的"页入口卡片 + 歌曲列表页 |
 
@@ -59,18 +60,27 @@ data class WeeklyRecCache(
 )
 
 // 生成结果：成功与"数据不足"都按周缓存；网络错误不缓存（保留重试）
+// Success 只缓存轻量字段（songId/歌名/歌手/封面），不持久化完整 Song 大对象
 sealed interface WeeklyRecCacheResult {
-    data class Success(val songs: List<Song>) : WeeklyRecCacheResult
+    data class Success(val songs: List<CachedSong>) : WeeklyRecCacheResult
     data object InsufficientData : WeeklyRecCacheResult
 }
+
+// 轻量缓存条目：足够渲染列表且可离线展示；需要播放时再转完整 Song（点播时才拉详情）
+data class CachedSong(
+    val songId: Long,
+    val name: String,
+    val artists: String,   // 歌手文本（如 "周杰伦"）
+    val cover: String?     // 封面 URL
+)
 
 // UI 状态：sealed，天然排除非法组合；数据不足携带统计信息
 sealed interface WeeklyRecUiState {
     data object Loading : WeeklyRecUiState
     data class Success(
-        val songs: List<Song>,
-        val seedCount: Int,          // 实际用于生成种子的歌数（≤ 8）
-        val displayWeekLabel: String // 如 "第 31 周"（由 displayWeekStart 经 IsoFields 计算）
+        val songs: List<CachedSong>,   // 轻量字段，与缓存一致；点播时才批量拉详情
+        val seedCount: Int,            // 实际用于生成种子的歌数（≤ 8）
+        val displayWeekLabel: String   // 如 "第 31 周"（由 displayWeekStart 经 IsoFields 计算）
     ) : WeeklyRecUiState
     data class InsufficientData(
         val validPlayCount: Int,     // 数据周有效播放事件数
@@ -85,7 +95,10 @@ sealed interface WeeklyRecUiState {
 - **写入条件**：播放进度首次跨过 `playedMs >= 30 秒` **或** `playedMs / durationMs >= 50%`（先达者，**含等号**，刚好 30 秒也计入）。
 - **会话标识**：播放器每次开始一首新歌时生成 `playbackSessionId`。记录前检查该会话是否已写入；**同一 `playbackSessionId` 只记一条**（去重播放器重复回调，且不依赖 ViewModel/页面状态——旋转、后台恢复、播放服务重连后会话标识仍由播放器层持有）。
 - **跨会话累计**：不同会话对同一首歌的正常重复播放各自记一条，以累计播放次数。
-- **保留期**：仅保留最近 14 天。
+- **保留期与清理时机**：仅保留最近 14 天，且**在实现中执行**，不是仅文档说明：
+  - **每次 `record()` 写入前**：先删除 `timestamp < now - 14d` 的旧条目，再追加新事件；
+  - **每次 `read()` 读取前**：同样先清理旧条目再返回（保证读取结果也一致）。
+  - 清理逻辑由统一方法 `WeeklyCacheCleaner.cleanupWeeklyCache(userId, now)` 提供（见 §11）。
 
 ## 6. 推荐算法（纯 Kotlin，两个纯函数，均不触碰网络）
 
@@ -153,19 +166,20 @@ private var inFlight: Deferred<WeeklyRecUiState>? = null
 ```
 1. 确定当前周：displayWeekStart = 本周一 LocalDate；sourceWeekStart = 上周一 LocalDate
    （周标识一律用 LocalDate 字符串；UI 标签 "第 N 周" 才用 IsoFields.WEEK_OF_WEEK_BASED_YEAR）
-2. 读缓存：schemaVersion 匹配 && displayWeekStart == 本周 && JSON 可解析 → 直接返回（Success 或 InsufficientData）
-3. 读 WeeklyPlayLog，过滤 events ∈ [sourceWeekStart, sourceWeekEnd)
+2. 读缓存：schemaVersion 匹配 && displayWeekStart == 本周 && JSON 可解析 → 直接返回（Success 或 InsufficientData）；
+   **若 schemaVersion 不匹配或 JSON 解析失败 → 删除该缓存条目（不让无效数据残留），视为 miss**
+3. 读 WeeklyPlayLog（读取前自动清理 14 天前旧数据，见 §5），过滤 events ∈ [sourceWeekStart, sourceWeekEnd)
 4. distinctSongCount < 2 → 写缓存 InsufficientData → 返回 InsufficientData(validPlayCount, distinctSongCount)
 5. 对数据周全部不同歌曲算 preliminaryScore → 取前 20 批量 getSongDetail 水合歌手信息（每批 ≤ 50）
 6. selectSeeds → 多样化 Top 8 种子（同 primaryArtistId ≤ 2）
 7. 对每颗种子调 getSimilarSongs（每颗取 10）：
    - 并发 ≤ 4（Semaphore），单请求超时 8s；部分种子失败 → 跳过继续
 8. rankCandidates → 聚合、去重、剔除数据周已听、primaryArtistId 上限（3→5）、排序
-9. 候选 = 0 → Error；否则 getSongDetail 取最终详情
+9. 候选 = 0 → Error；否则 getSongDetail 取最终详情 → 转 `CachedSong` 轻量字段
 10. 写缓存前再次校验：
     currentUserId == generationUserId && currentDisplayWeekStart == generationDisplayWeekStart && coroutineContext.isActive
     不满足则放弃写入（防账号切换竞态回写旧账号缓存）
-11. 写缓存（Success）→ 返回 Success(songs, seedCount, label)
+11. 写缓存（Success）：**覆盖同一 key `weekly_rec:{userId}`**（每用户仅一份，不按周新增 key）→ 返回 Success(songs, seedCount, label)
 ```
 
 ## 8. 更新机制（固定周一 · 用上周数据）
@@ -200,16 +214,52 @@ private var inFlight: Deferred<WeeklyRecUiState>? = null
 - 候选 > 0 但 < 30 → `Success` 展示实际数量。
 - `InsufficientData`（数据周 `distinctSongCount < 2`，与事件条数无关）与 `Error` 独立，不复用。
 - **数据不足按周缓存**（本周内不会再变化，避免每次打开都重算）。
-- 缓存损坏 / schemaVersion 不匹配 → 视为 miss，重新生成。
+- 缓存损坏 / schemaVersion 不匹配 / JSON 解析失败 → **删除该缓存条目**，视为 miss 重新生成（无效数据不留存）。
+- 播放日志每次写入 / 读取时清理 14 天前数据（§5、§11.2）。
 - 账号切换 → 不同 userId 缓存 key 天然隔离；写缓存前再次校验身份（见 §7 步骤 10）。
 - 生成中重复进入 → UseCase 单飞（Mutex + inFlight），不重复请求。
 
-## 11. 缓存与账号切换
+## 11. 缓存策略与清理
 
-- key：`weekly_rec:{userId}`、`weekly_play_log:{userId}`。
-- `WeeklyRecCache` 含 `schemaVersion` + `sourceWeekStart` + `displayWeekStart` + sealed `result`。
-- 常量 `schemaVersion`；升级后旧缓存作废。
-- 登出 → `AppCache.clearUserData()` 同时清理两个 key。
+### 11.1 key 约定（每用户固定 key，不累积）
+
+- `weekly_play_log:{userId}`：播放日志，**单 key**。
+- `weekly_rec:{userId}`：周推荐缓存，**单 key，每用户仅一份**。生成新一周推荐时**直接覆盖旧缓存**，**不按周新增 key**，避免长期使用后缓存 key 无限增长。
+
+### 11.2 播放日志：14 天清理（写入与读取都执行）
+
+- 每次 `record()` 写入前、`read()` 读取前，都删除 `timestamp < now - 14d` 的旧条目。
+- 保留期由实现保证，不只是文档约定。
+
+### 11.3 周推荐缓存：无效即删
+
+- `schemaVersion` 不匹配、JSON 解析失败、字段缺失等**任何无效情况 → 删除该缓存条目**，视为 miss 重新生成，不让无效数据一直残留。
+
+### 11.4 轻量缓存字段
+
+- `Success` 只缓存 `CachedSong(songId, name, artists, cover)` 轻量字段（足够渲染列表、可离线展示），**不持久化完整 `Song` 大对象**；点播时才批量拉详情转完整 `Song`。
+
+### 11.5 统一清理方法
+
+```kotlin
+// WeeklyCacheCleaner
+fun cleanupWeeklyCache(userId: Long, now: Long)
+```
+
+职责：
+1. 删除 14 天以前的播放日志条目（`weekly_play_log:{userId}`）；
+2. 删除无效 / schemaVersion 过期 / 解析失败的周推荐缓存（`weekly_rec:{userId}`）；
+3. 保证每个用户只存在一份周推荐结果（覆盖式写入 + 上面两条清理保证）。
+
+**调用时机**：
+- 播放日志 `record()` / `read()` 内部（§5）；
+- 周推荐生成流程读缓存时（§7 步骤 2，命中无效缓存即删）；
+- **退出登录**：通过 `AppCache.clearUserData()` 增加对两个 weekly key 的清理（该方法需接收当前 `userId`，移除 `weekly_play_log:{userId}` 与 `weekly_rec:{userId}`）；
+- 账号切换：不同用户不同 key 天然隔离，无混用；旧账号在途生成任务由 UseCase 单飞随登录态取消（§7）。
+
+### 11.6 存储占用说明
+
+- 缓存只占手机**本地存储**（SharedPreferences），不长期占运行内存；定期清理 + 覆盖式写入保证长期使用后数据不持续累积。
 
 ## 12. 测试
 
@@ -230,23 +280,30 @@ private var inFlight: Deferred<WeeklyRecUiState>? = null
 - `WeeklyRecommendationStoreTest`：
   - **周日 23:59 与周一 00:00 边界**
   - **ISO 周跨年（如 2025-12-29 周一 vs 2026-01-05 周一）**
-  - schemaVersion 不匹配 → 失效
-  - 缓存损坏 → 视为 miss
+  - schemaVersion 不匹配 → **删除旧缓存**并视为 miss
+  - 缓存损坏 / 解析失败 → **删除该条目**并视为 miss
   - 账号切换 → 不同 key
   - InsufficientData 按周缓存命中
+  - 生成新一周 → **覆盖同一 key**，不新增 key（每用户仅一份）
+  - 缓存只保存轻量 `CachedSong` 字段（不含完整 Song 大对象）
+- `WeeklyCacheCleanerTest`：
+  - `cleanupWeeklyCache` 删除 14 天前播放日志
+  - 删除无效 / 版本过期的周推荐缓存
+  - 清理后每用户周推荐 key 恰好一份
+  - 退出登录 → `clearUserData(userId)` 同时清除播放日志与周推荐缓存
 
 ## 13. 核心流程（最终）
 
 ```
-播放达到有效条件后记录事件（>=30s 或 >=50%，playbackSessionId 会话内去重、跨会话累计）
+播放达到有效条件后记录事件（>=30s 或 >=50%，playbackSessionId 会话内去重、跨会话累计；写入前清理 14 天前数据）
 → 本周首次打开页面
 → 读取上一个完整自然周的播放记录（上周一 00:00 → 本周一 00:00，用周一日期作周键）
 → 先算初步分（次数 0.7 + 新鲜度 0.3）→ 批量水合歌手信息
 → 选择多样化 Top 8 种子（同歌手 ≤ 2）
 → 并发获取相似歌曲（≤ 4 并发、单请求超时、UseCase 单飞防重）
 → 种子加权聚合、去重、剔除上周已听歌曲、primaryArtistId 上限（3→5）
-→ 获取歌曲详情
-→ 写缓存前校验身份 → 缓存（schemaVersion + 周一日期键 + sealed 结果）
+→ 获取歌曲详情 → 转轻量 CachedSong
+→ 写缓存前校验身份 → 覆盖式缓存（单 key、schemaVersion + 周一日期键 + sealed 结果；无效缓存即删）
 → 展示实际生成数量
 ```
 
