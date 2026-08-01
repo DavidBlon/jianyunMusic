@@ -18,6 +18,7 @@ import com.ncm.app.ui.screens.my.MyScreen
 import com.ncm.app.ui.screens.playlist.PlaylistDetailScreen
 import com.ncm.app.ui.screens.quick.QuickListScreen
 import com.ncm.app.ui.screens.search.SearchScreen
+import com.ncm.app.ui.screens.weekly.WeeklyRecommendationScreen
 import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.PlayerViewModel
 
@@ -31,6 +32,7 @@ object Routes {
     const val QUICK_LIST = "quick/{type}"
     const val ARTIST_DETAIL = "artist/{artistId}"
     const val DISCLAIMER = "disclaimer"
+    const val WEEKLY = "weekly"
 
     fun playlistDetail(id: Long) = "playlist/$id"
     fun player(songId: Long) = "player/$songId"
@@ -160,6 +162,9 @@ fun NavGraph(
                 onDisclaimerClick = {
                     navController.navigate(Routes.DISCLAIMER)
                 },
+                onWeeklyClick = {
+                    navController.navigate(Routes.WEEKLY)
+                },
                 playerViewModel = playerViewModel,
                 viewModel = mainViewModel
             )
@@ -167,6 +172,15 @@ fun NavGraph(
 
         composable(Routes.DISCLAIMER) {
             DisclaimerScreen(onBack = { navController.popBackStack() })
+        }
+
+        composable(Routes.WEEKLY) {
+            WeeklyRecommendationScreen(
+                onBack = { navController.popBackStack() },
+                onOpenPlayer = onOpenPlayer,
+                playerViewModel = playerViewModel,
+                viewModel = mainViewModel
+            )
         }
 
         composable(Routes.LOGIN) {
