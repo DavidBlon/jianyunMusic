@@ -55,4 +55,35 @@ class WeeklyRecUiMapperTest {
     fun successSubtitleFormat() {
         assertEquals("根据上周 8 首常听歌曲生成 · 26 首", WeeklyRecUiMapper.successSubtitle(8, 26))
     }
+
+    @Test
+    fun weeklyRowSuccessUsesFirstSongCoverAndCount() {
+        val state = WeeklyRecUiState.Success(
+            songs = listOf(
+                CachedSong(songId = 1, name = "A", artists = listOf("X"), cover = "http://cover/1"),
+                CachedSong(songId = 2, name = "B", artists = listOf("Y"), cover = null)
+            ),
+            seedCount = 2,
+            displayWeekLabel = "第 31 周"
+        )
+        val row = weeklyRow(state)
+        assertEquals(WEEKLY_PLAYLIST_ID, row.id)
+        assertEquals("每周推荐", row.name)
+        assertEquals("http://cover/1", row.cover)
+        assertEquals(2, row.trackCount)
+    }
+
+    @Test
+    fun weeklyRowNonSuccessShowsZeroCountAndNoCover() {
+        val rows = listOf(
+            weeklyRow(WeeklyRecUiState.Loading),
+            weeklyRow(WeeklyRecUiState.InsufficientData(validPlayCount = 1, distinctSongCount = 1)),
+            weeklyRow(WeeklyRecUiState.Error("boom"))
+        )
+        for (row in rows) {
+            assertEquals(WEEKLY_PLAYLIST_ID, row.id)
+            assertEquals("每周推荐", row.name)
+            assertEquals(0, row.trackCount)
+        }
+    }
 }
