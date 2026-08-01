@@ -33,6 +33,15 @@ class SessionManager(context: Context) {
         get() = prefs.getString("playback_quality", "STANDARD") ?: "STANDARD"
         set(value) = prefs.edit().putString("playback_quality", value).apply()
 
+    /** 会话版本号：登录/退出时单调递增，用于让过期生成任务放弃写缓存。 */
+    var sessionGeneration: Int
+        get() = prefs.getInt("session_generation", 0)
+        private set(value) = prefs.edit().putInt("session_generation", value).apply()
+
+    fun invalidate() {
+        sessionGeneration++
+    }
+
     var qrDeviceId: String
         get() = prefs.getString("qr_device_id", "") ?: ""
         set(value) = prefs.edit().putString("qr_device_id", value).apply()
@@ -48,6 +57,7 @@ class SessionManager(context: Context) {
         this.nickname = nickname
         this.avatar = avatar ?: ""
         this.vipType = vipType
+        sessionGeneration++
     }
 
     fun saveCookie(cookie: String) {
