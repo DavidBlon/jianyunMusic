@@ -1,6 +1,7 @@
 package com.ncm.app
 
 import android.app.Application
+import android.content.Context
 import com.ncm.app.data.AppCache
 import com.ncm.app.data.MusicSourceSettings
 import com.ncm.app.data.SessionManager
@@ -8,13 +9,26 @@ import com.ncm.app.data.api.NeteaseApi
 import com.ncm.app.data.cache.LinglanAudioCache
 import com.ncm.app.data.repository.MusicRepository
 import com.ncm.app.data.repository.MusicSourceKeyValidator
+import com.ncm.app.data.weekly.WeeklyCacheCleaner
+import com.ncm.app.data.weekly.WeeklyPlayLog
+import com.ncm.app.data.weekly.WeeklyRecommendationStore
+import com.ncm.app.data.weekly.WeeklyDatabase
+import com.ncm.app.domain.weekly.GenerateWeeklyRecommendationUseCase
 import com.ncm.app.ui.theme.AccentThemeSettings
 import com.ncm.app.ui.theme.PlayerAppearanceSettings
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
+import java.time.ZoneId
+
+/** App 级协程作用域：周推荐生成/清理等后台任务用它，避免被调用方取消连带。 */
+val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
 class NeteaseApp : Application() {
 
@@ -39,6 +53,14 @@ class NeteaseApp : Application() {
         private set
     lateinit var playerAppearanceSettings: PlayerAppearanceSettings
         private set
+    lateinit var weeklyPlayLog: WeeklyPlayLog
+        private set
+    lateinit var weeklyRecommendationStore: WeeklyRecommendationStore
+        private set
+    lateinit var generateWeeklyRecommendationUseCase: GenerateWeeklyRecommendationUseCase
+        private set
+    lateinit var weeklyCacheCleaner: WeeklyCacheCleaner
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -55,6 +77,10 @@ class NeteaseApp : Application() {
         cache.remove(AppCache.KEY_DISCOVER)
         cache.remove(AppCache.KEY_MY)
         initNetwork()
+        initWeeklyRecommendation()
+        applicationScope.launch {
+            weeklyCacheCleaner.cleanupOnAppStart(session.userId)
+        }
     }
 
     private fun initNetwork() {
@@ -92,6 +118,23 @@ class NeteaseApp : Application() {
 
         api = retrofit.create(NeteaseApi::class.java)
         repository = MusicRepository(api, session, linglanAudioCache, musicSourceSettings)
+    }
+
+    private fun initWeeklyRecommendation() {
+        weeklyPlayLog = WeeklyPlayLog(WeeklyDatabase.get(this))
+        val weeklyPrefs = getSharedPreferences(WeeklyRecommendationStore.PREF_NAME, Context.MODE_PRIVATE)
+        weeklyRecommendationStore = WeeklyRecommendationStore(weeklyPrefs)
+        weeklyCacheCleaner = WeeklyCacheCleaner(weeklyPlayLog, weeklyRecommendationStore)
+        generateWeeklyRecommendationUseCase = GenerateWeeklyRecommendationUseCase(
+            source = repository,
+            weeklyPlayLog = weeklyPlayLog,
+            store = weeklyRecommendationStore,
+            currentUserId = { session.userId },
+            currentSessionGeneration = { session.sessionGeneration },
+            scope = applicationScope,
+            zoneIdProvider = { ZoneId.systemDefault() },
+            nowMs = { System.currentTimeMillis() }
+        )
     }
 
     companion object {

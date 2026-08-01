@@ -1,5 +1,6 @@
 package com.ncm.app.viewmodel
 
+import android.util.Log
 import android.webkit.CookieManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -7,6 +8,16 @@ import com.ncm.app.NeteaseApp
 import com.ncm.app.data.AppCache
 import com.ncm.app.data.model.*
 import com.ncm.app.data.repository.MusicSourceKeyValidationResult
+import com.ncm.app.data.weekly.WeeklyCacheCleaner
+import com.ncm.app.data.weekly.WeeklyLogoutCoordinator
+import com.ncm.app.domain.weekly.GenerationKey
+import com.ncm.app.domain.weekly.GenerateWeeklyRecommendationUseCase
+import com.ncm.app.domain.weekly.WeeklyRecUiMapper
+import com.ncm.app.domain.weekly.WeeklyRecUiState
+import java.time.DayOfWeek
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.temporal.TemporalAdjusters
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -101,6 +112,35 @@ class MainViewModel : ViewModel() {
 
     private val _myState = MutableStateFlow(if (session.isLoggedIn) MyUiState() else MyUiState(isLoading = false))
     val myState: StateFlow<MyUiState> = _myState
+
+    private val _weeklyRecState = MutableStateFlow<WeeklyRecUiState>(WeeklyRecUiState.Loading)
+    val weeklyRecState: StateFlow<WeeklyRecUiState> = _weeklyRecState
+
+    private val _weeklyDetailSongs = MutableStateFlow<List<Song>?>(null)
+    val weeklyDetailSongs: StateFlow<List<Song>?> = _weeklyDetailSongs
+
+    private val _weeklyDetailLoading = MutableStateFlow(false)
+    val weeklyDetailLoading: StateFlow<Boolean> = _weeklyDetailLoading
+
+    private val _logoutCleanupWarning = MutableStateFlow<String?>(null)
+    val logoutCleanupWarning: StateFlow<String?> = _logoutCleanupWarning
+
+    private val generateWeeklyRecommendationUseCase: GenerateWeeklyRecommendationUseCase
+        get() = NeteaseApp.instance.generateWeeklyRecommendationUseCase
+    private val weeklyCacheCleaner: WeeklyCacheCleaner
+        get() = NeteaseApp.instance.weeklyCacheCleaner
+
+    private val logoutCoordinator by lazy {
+        WeeklyLogoutCoordinator(
+            invalidateSession = { session.invalidate() },
+            cancelInFlight = { generateWeeklyRecommendationUseCase.cancelGenerationForUser(session.userId) },
+            cleaner = weeklyCacheCleaner
+        )
+    }
+
+    fun consumeLogoutCleanupWarning() {
+        _logoutCleanupWarning.value = null
+    }
 
     private val _quickListState = MutableStateFlow(QuickListUiState())
     val quickListState: StateFlow<QuickListUiState> = _quickListState
@@ -389,6 +429,60 @@ class MainViewModel : ViewModel() {
     private fun loadSearchHistory(): List<String> =
         cache.get<List<String>>(AppCache.KEY_SEARCH_HISTORY_PREFIX + session.userId).orEmpty()
 
+    fun loadWeeklyRecommendation() {
+        if (_weeklyRecState.value is WeeklyRecUiState.Success ||
+            _weeklyRecState.value is WeeklyRecUiState.InsufficientData
+        ) return
+        val userId = session.userId
+        if (userId <= 0 || !session.isLoggedIn) {
+            _weeklyRecState.value = WeeklyRecUiState.Loading
+            return
+        }
+        viewModelScope.launch {
+            val zoneId = ZoneId.systemDefault()
+            val displayWeekStart = LocalDate.now(zoneId)
+                .with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+            val result = generateWeeklyRecommendationUseCase.execute(
+                GenerationKey(userId = userId, displayWeekStart = displayWeekStart)
+            )
+            _weeklyRecState.value = WeeklyRecUiMapper.toUiState(result)
+        }
+    }
+
+    fun cleanupWeeklyCacheOnPageOpen() {
+        val userId = session.userId
+        if (userId <= 0) return
+        viewModelScope.launch {
+            weeklyCacheCleaner.cleanupOnPageOpen(userId)
+        }
+    }
+
+    /** 详情页水合：返回整份歌单的完整 Song 列表（含封面）。已加载或加载中直接返回。 */
+    suspend fun hydrateWeeklyDetailSongsNow(): List<Song>? {
+        _weeklyDetailSongs.value?.takeIf { it.isNotEmpty() }?.let { return it }
+        if (_weeklyDetailLoading.value) return null
+        _weeklyDetailLoading.value = true
+        return try {
+            val state = _weeklyRecState.value
+            val ids = (state as? WeeklyRecUiState.Success)?.songs?.map { it.songId }.orEmpty()
+            if (ids.isEmpty()) {
+                _weeklyDetailSongs.value = null
+                null
+            } else {
+                val loaded = repo.getSongDetail(ids).getOrNull().orEmpty()
+                if (loaded.isEmpty()) {
+                    _weeklyDetailSongs.value = null
+                    null
+                } else {
+                    _weeklyDetailSongs.value = loaded
+                    loaded
+                }
+            }
+        } finally {
+            _weeklyDetailLoading.value = false
+        }
+    }
+
     fun loadMyData(force: Boolean = false) {
         if (!force && !_myState.value.isLoading && (_myState.value.profile != null || _myState.value.playlists.isNotEmpty())) return
 
@@ -571,9 +665,22 @@ class MainViewModel : ViewModel() {
     fun logout() {
         viewModelScope.launch {
             qrPollingJob?.cancel()
+            val userId = session.userId
+            // 严格顺序：① invalidate → ② cancelInFlight → ③ clearWeeklyUserData
+            val cleanupResult = logoutCoordinator.execute(userId)
+            if (!cleanupResult.success) {
+                Log.e(
+                    "MainViewModel",
+                    "weekly data cleanup failed: room=${cleanupResult.roomCleared} cache=${cleanupResult.recommendationCacheCleared}"
+                )
+                _logoutCleanupWarning.value = "部分本地数据清理失败"
+            }
             _appState.value = AppUiState(isLoggedIn = false)
             _loginState.value = LoginUiState()
             _myState.value = MyUiState(isLoading = false)
+            _weeklyRecState.value = WeeklyRecUiState.Loading
+            _weeklyDetailSongs.value = null
+            _weeklyDetailLoading.value = false
             playlistCache.clear()
             artistDetailCache.clear()
             quickListCache.clear()

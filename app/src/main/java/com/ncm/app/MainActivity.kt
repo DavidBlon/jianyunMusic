@@ -187,10 +187,16 @@ fun MainApp() {
         }
     }
 
+    val context = LocalContext.current
     LaunchedEffect(appState.isLoggedIn, currentRoute) {
         if (!appState.isLoggedIn && currentRoute != null && currentRoute != Routes.LOGIN) {
             navController.navigate(Routes.LOGIN) {
                 popUpTo(0) { inclusive = true }
+            }
+            val warning = mainViewModel.logoutCleanupWarning.value
+            if (warning != null) {
+                Toast.makeText(context, warning, Toast.LENGTH_LONG).show()
+                mainViewModel.consumeLogoutCleanupWarning()
             }
         }
     }
