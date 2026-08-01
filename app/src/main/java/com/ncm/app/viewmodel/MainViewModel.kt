@@ -12,6 +12,7 @@ import com.ncm.app.data.weekly.WeeklyCacheCleaner
 import com.ncm.app.data.weekly.WeeklyLogoutCoordinator
 import com.ncm.app.domain.weekly.GenerationKey
 import com.ncm.app.domain.weekly.GenerateWeeklyRecommendationUseCase
+import com.ncm.app.domain.weekly.WEEKLY_PLAYLIST_ID
 import com.ncm.app.domain.weekly.WeeklyRecUiMapper
 import com.ncm.app.domain.weekly.WeeklyRecUiState
 import java.time.DayOfWeek
@@ -22,6 +23,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 data class DiscoverUiState(
@@ -212,6 +215,10 @@ class MainViewModel : ViewModel() {
     }
 
     fun loadPlaylistDetail(id: Long, force: Boolean = false) {
+        if (id == WEEKLY_PLAYLIST_ID) {
+            loadWeeklyPlaylistDetail()
+            return
+        }
         if (!force) {
             playlistCache[id]?.let {
                 _playlistState.value = it
@@ -266,6 +273,44 @@ class MainViewModel : ViewModel() {
             }.onFailure { e ->
                 _playlistState.value = PlaylistDetailUiState(isLoading = false, error = e.message, loadedPlaylistId = id)
             }
+        }
+    }
+
+    /** 每周推荐以标准歌单详情呈现：生成落定后水合歌单，无数据/失败时给出空态文案。 */
+    private fun loadWeeklyPlaylistDetail() {
+        if (_playlistState.value.isLoading && _playlistState.value.loadedPlaylistId == WEEKLY_PLAYLIST_ID) return
+        viewModelScope.launch {
+            loadWeeklyRecommendation()
+            _weeklyRecState.filter { it !is WeeklyRecUiState.Loading }.first()
+            val rec = _weeklyRecState.value
+            val count = (rec as? WeeklyRecUiState.Success)?.songs?.size ?: 0
+            val cover = (rec as? WeeklyRecUiState.Success)?.songs?.firstOrNull()?.cover
+            val meta = PlaylistMeta(
+                id = WEEKLY_PLAYLIST_ID,
+                name = "每周推荐",
+                cover = cover,
+                trackCount = count
+            )
+            _playlistState.value = PlaylistDetailUiState(
+                playlist = meta,
+                isLoading = true,
+                loadedPlaylistId = WEEKLY_PLAYLIST_ID
+            )
+            val songs = hydrateWeeklyDetailSongsNow().orEmpty()
+            val error = when (rec) {
+                is WeeklyRecUiState.InsufficientData -> "本周听歌数据不足，多听几首下周再来"
+                is WeeklyRecUiState.Error -> rec.message
+                is WeeklyRecUiState.Success -> if (songs.isEmpty()) "歌曲加载失败，请重试" else null
+                WeeklyRecUiState.Loading -> null
+            }
+            _playlistState.value = PlaylistDetailUiState(
+                playlist = meta,
+                songs = songs,
+                isLoading = false,
+                error = error,
+                loadedPlaylistId = WEEKLY_PLAYLIST_ID,
+                isFullyLoaded = true
+            )
         }
     }
 
