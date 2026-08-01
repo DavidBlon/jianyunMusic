@@ -137,6 +137,21 @@ fun PlaylistDetailScreen(
                         CircularProgressIndicator(color = Green500)
                     }
                 }
+            } else if (visibleSongs.isEmpty()) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 48.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = state.error ?: "暂无歌曲",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextTertiary
+                        )
+                    }
+                }
             } else {
                 itemsIndexed(
                     items = visibleSongs,
