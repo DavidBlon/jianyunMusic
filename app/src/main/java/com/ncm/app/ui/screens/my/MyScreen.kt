@@ -11,7 +11,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.QueueMusic
 import androidx.compose.material.icons.outlined.DeleteOutline
@@ -43,11 +42,8 @@ import com.ncm.app.NeteaseApp
 import com.ncm.app.ui.theme.*
 import com.ncm.app.ui.components.MusicSourceKeySettingsSheet
 import com.ncm.app.util.sizedImageUrl
-import androidx.compose.material.icons.outlined.AutoAwesome
-import androidx.compose.material.icons.outlined.MusicNote
-import androidx.compose.material.icons.outlined.Refresh
-import com.ncm.app.domain.weekly.WeeklyRecUiMapper
-import com.ncm.app.domain.weekly.WeeklyRecUiState
+import com.ncm.app.domain.weekly.WEEKLY_PLAYLIST_ID
+import com.ncm.app.domain.weekly.weeklyRow
 import com.ncm.app.viewmodel.LinglanCacheUiState
 import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.PlayerViewModel
@@ -59,7 +55,6 @@ fun MyScreen(
     onSongClick: (Long) -> Unit,
     onLogout: () -> Unit,
     onDisclaimerClick: () -> Unit,
-    onWeeklyClick: () -> Unit,
     playerViewModel: PlayerViewModel,
     viewModel: MainViewModel = viewModel()
 ) {
@@ -119,10 +114,9 @@ fun MyScreen(
             Spacer(modifier = Modifier.height(8.dp))
         }
         item {
-            WeeklyRecommendationCard(
-                state = weeklyRecState,
-                onClick = onWeeklyClick,
-                onRetry = { viewModel.loadWeeklyRecommendation() }
+            MyPlaylistItem(
+                playlist = weeklyRow(weeklyRecState),
+                onClick = { onPlaylistClick(WEEKLY_PLAYLIST_ID) }
             )
             Spacer(modifier = Modifier.height(8.dp))
         }
@@ -714,118 +708,5 @@ private fun MyPlaylistItem(playlist: Playlist, onClick: () -> Unit) {
             Text("${playlist.trackCount} 首", style = MaterialTheme.typography.bodySmall, color = TextTertiary, modifier = Modifier.padding(top = 2.dp))
         }
         Icon(androidx.compose.material.icons.Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = TextTertiary, modifier = Modifier.size(18.dp))
-    }
-}
-
-@Composable
-private fun WeeklyRecommendationCard(
-    state: WeeklyRecUiState,
-    onClick: () -> Unit,
-    onRetry: () -> Unit
-) {
-    when (state) {
-        is WeeklyRecUiState.Loading -> {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 4.dp)
-                    .glassSurface(RoundedCornerShape(18.dp), elevation = 8.dp)
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp, color = Green500)
-                Spacer(Modifier.width(12.dp))
-                Column {
-                    Text("每周推荐", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                    Text("正在根据本周听歌记录生成…", style = MaterialTheme.typography.bodySmall, color = TextTertiary)
-                }
-            }
-        }
-
-        is WeeklyRecUiState.Success -> {
-            val cover = state.songs.firstOrNull()?.cover
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 4.dp)
-                    .glassSurface(RoundedCornerShape(18.dp), elevation = 8.dp)
-                    .clickable(onClick = onClick)
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(56.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(GlassSurface),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (!cover.isNullOrBlank()) {
-                        AsyncImage(
-                            sizedImageUrl(cover, 140),
-                            null,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    } else {
-                        Icon(Icons.Outlined.AutoAwesome, null, tint = Green500, modifier = Modifier.size(26.dp))
-                    }
-                }
-                Spacer(Modifier.width(14.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("每周推荐", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                    Text(
-                        WeeklyRecUiMapper.successSubtitle(state.seedCount, state.songs.size),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextTertiary,
-                        modifier = Modifier.padding(top = 2.dp)
-                    )
-                }
-                Icon(
-                    androidx.compose.material.icons.Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    null,
-                    tint = TextTertiary,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-        }
-
-        is WeeklyRecUiState.InsufficientData -> {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 4.dp)
-                    .glassSurface(RoundedCornerShape(18.dp), elevation = 8.dp)
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Outlined.MusicNote, null, tint = TextTertiary, modifier = Modifier.size(24.dp))
-                Spacer(Modifier.width(12.dp))
-                Column {
-                    Text("每周推荐", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                    Text("听歌数据不足，多听几首下周再来", style = MaterialTheme.typography.bodySmall, color = TextTertiary)
-                }
-            }
-        }
-
-        is WeeklyRecUiState.Error -> {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 4.dp)
-                    .glassSurface(RoundedCornerShape(18.dp), elevation = 8.dp)
-                    .clickable(onClick = onRetry)
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Outlined.Refresh, null, tint = TextTertiary, modifier = Modifier.size(24.dp))
-                Spacer(Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("每周推荐", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                    Text(state.message, style = MaterialTheme.typography.bodySmall, color = TextTertiary)
-                }
-                Text("重试", style = MaterialTheme.typography.labelMedium, color = Green500)
-            }
-        }
     }
 }

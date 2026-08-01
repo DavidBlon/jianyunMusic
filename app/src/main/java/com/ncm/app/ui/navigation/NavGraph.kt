@@ -162,9 +162,6 @@ fun NavGraph(
                 onDisclaimerClick = {
                     navController.navigate(Routes.DISCLAIMER)
                 },
-                onWeeklyClick = {
-                    navController.navigate(Routes.WEEKLY)
-                },
                 playerViewModel = playerViewModel,
                 viewModel = mainViewModel
             )
