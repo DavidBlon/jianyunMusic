@@ -51,6 +51,11 @@ object AppPlayer {
     private val mediaSnapshots = mutableMapOf<Long, PlaybackSnapshot>()
     private val rhythmAudioProcessor = RhythmAudioProcessor()
 
+    /** 当前播放会话累计器（播放层单例持有，可跨 ViewModel 重建）。 */
+    val sessionAccumulator = PlaySessionAccumulator()
+    private var currentPlaybackSessionIdValue: String? = null
+    private var currentPlaybackSessionSongIdValue: Long = 0L
+
     fun player(context: Context): ExoPlayer {
         val appContext = context.applicationContext
         return exoPlayer ?: ExoPlayer.Builder(appContext)
@@ -244,6 +249,19 @@ object AppPlayer {
         currentSource = source
     }
 
+    /** 媒体项切换时开启新播放会话：重置累计器并生成确定性会话 id。 */
+    fun beginPlaybackSession(song: Song) {
+        sessionAccumulator.beginSession()
+        currentPlaybackSessionSongIdValue = song.id
+        currentPlaybackSessionIdValue = "${song.id}:${sessionAccumulator.sessionStartedAt}"
+    }
+
+    fun currentPlaybackSessionId(): String? = currentPlaybackSessionIdValue
+
+    fun currentPlaybackSessionSongId(): Long = currentPlaybackSessionSongIdValue
+
+    fun currentPlaybackSessionStartedAt(): Long = sessionAccumulator.sessionStartedAt
+
     fun scheduleLinglanCacheFill(url: String, cacheKey: String) {
         NeteaseApp.instance.linglanAudioCache.scheduleFullCache(
             url = url,
@@ -268,6 +286,8 @@ object AppPlayer {
         currentSong = null
         currentSource = "netease"
         mediaSnapshots.clear()
+        currentPlaybackSessionIdValue = null
+        currentPlaybackSessionSongIdValue = 0L
         playbackServiceStarted = false
     }
 

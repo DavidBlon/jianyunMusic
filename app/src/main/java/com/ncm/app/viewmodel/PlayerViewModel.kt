@@ -12,6 +12,7 @@ import com.ncm.app.data.model.PlaybackSource
 import com.ncm.app.data.model.Song
 import com.ncm.app.data.model.SongUrlResponse
 import com.ncm.app.data.model.withArtworkFrom
+import com.ncm.app.data.weekly.PlayEventEntity
 import com.ncm.app.playback.AppPlayer
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -157,6 +158,7 @@ class PlayerViewModel : ViewModel() {
                 ?.let { currentIndex = it }
 
             AppPlayer.updateCurrentPlayback(prepared.song, prepared.source)
+            AppPlayer.beginPlaybackSession(prepared.song)
             AppPlayer.refreshPlaybackNotification(app)
             _state.value = _state.value.copy(
                 currentSong = prepared.song,
@@ -328,6 +330,7 @@ class PlayerViewModel : ViewModel() {
     fun setProgress(progress: Float) {
         val duration = player.duration.takeIf { it > 0 } ?: return
         val position = (duration * progress.coerceIn(0f, 1f)).toLong()
+        AppPlayer.sessionAccumulator.onSeekStarted()
         player.seekTo(position)
         _state.value = _state.value.copy(
             currentPosition = position,
@@ -1238,9 +1241,19 @@ class PlayerViewModel : ViewModel() {
     private fun startProgressUpdates() {
         progressJob?.cancel()
         progressJob = viewModelScope.launch {
+            val accumulator = AppPlayer.sessionAccumulator
             while (player.isPlaying) {
-                val duration = player.duration.takeIf { it > 0 } ?: 1
+                val rawDuration = player.duration
+                val duration = rawDuration.takeIf { it > 0 } ?: 1
                 val position = player.currentPosition.coerceAtLeast(0)
+                accumulator.track(position, isPlaying = true)
+                if (accumulator.consumeQualification(rawDuration)) {
+                    recordQualifiedPlay(
+                        songId = AppPlayer.currentPlaybackSessionSongId(),
+                        playbackSessionId = AppPlayer.currentPlaybackSessionId(),
+                        sessionStartedAt = AppPlayer.currentPlaybackSessionStartedAt()
+                    )
+                }
                 val current = _state.value
                 if (
                     kotlin.math.abs(position - current.currentPosition) >= MIN_PROGRESS_UPDATE_MS ||
@@ -1254,6 +1267,26 @@ class PlayerViewModel : ViewModel() {
                 }
                 delay(PROGRESS_UPDATE_INTERVAL_MS)
             }
+        }
+    }
+
+    /** 有效播放达标后，把当前会话写入每周播放记录（去重由唯一索引保证）。 */
+    private fun recordQualifiedPlay(
+        songId: Long,
+        playbackSessionId: String?,
+        sessionStartedAt: Long
+    ) {
+        val userId = session.userId
+        if (userId <= 0 || songId <= 0L || playbackSessionId.isNullOrBlank()) return
+        viewModelScope.launch {
+            NeteaseApp.instance.weeklyPlayLog.record(
+                PlayEventEntity(
+                    userId = userId,
+                    songId = songId,
+                    playbackSessionId = playbackSessionId,
+                    sessionStartedAt = sessionStartedAt
+                )
+            )
         }
     }
 
