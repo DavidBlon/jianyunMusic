@@ -29,6 +29,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -47,6 +48,7 @@ import com.ncm.app.data.model.Song
 import com.ncm.app.ui.theme.*
 import com.ncm.app.util.albumArtworkThumbnailCacheKey
 import com.ncm.app.util.albumArtworkThumbnailUrl
+import com.ncm.app.util.albumArtworkDisplayScale
 import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -404,7 +406,13 @@ fun SongListItem(
                 AsyncImage(
                     model = artworkRequest,
                     contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            val scale = albumArtworkDisplayScale(song.album?.picUrl)
+                            scaleX = scale
+                            scaleY = scale
+                        },
                     contentScale = ContentScale.Crop
                 )
             }
@@ -429,7 +437,9 @@ fun SongListItem(
             )
         }
 
-        Text(song.durationText, style = MaterialTheme.typography.bodySmall, color = TextTertiary)
+        if (song.dt > 0) {
+            Text(song.durationText, style = MaterialTheme.typography.bodySmall, color = TextTertiary)
+        }
         Spacer(modifier = Modifier.width(12.dp))
         Icon(
             imageVector = androidx.compose.material.icons.Icons.Outlined.MoreVert,

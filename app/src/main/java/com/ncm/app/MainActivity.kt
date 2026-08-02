@@ -87,6 +87,7 @@ import com.ncm.app.ui.screens.player.PlayerScreen
 import com.ncm.app.ui.theme.*
 import com.ncm.app.util.albumArtworkThumbnailCacheKey
 import com.ncm.app.util.albumArtworkThumbnailUrl
+import com.ncm.app.util.albumArtworkDisplayScale
 import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.PlayerViewModel
 import kotlinx.coroutines.delay
@@ -761,7 +762,18 @@ fun MiniPlayer(
                 contentAlignment = Alignment.Center
             ) {
                 if (coverRequest != null) {
-                    AsyncImage(coverRequest, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                    AsyncImage(
+                        model = coverRequest,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                val scale = albumArtworkDisplayScale(coverUrl)
+                                scaleX = scale
+                                scaleY = scale
+                            },
+                        contentScale = ContentScale.Crop
+                    )
                 }
             }
 

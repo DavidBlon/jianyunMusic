@@ -21,6 +21,8 @@ import com.ncm.app.domain.weekly.WeeklyRecommendationSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
@@ -49,6 +51,7 @@ class MusicRepository(
         private const val BACKUP_SONG_URL_TIMEOUT_MS = 11_500L
         private const val PLAYLIST_INITIAL_TRACK_LIMIT = 120
         private const val PLAYLIST_FULL_TRACK_LIMIT = 100000
+        private const val JIANYUN_CATALOG_CACHE_MS = 60_000L
         private const val PLAYBACK_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.0.18.203152"
     }
@@ -66,6 +69,9 @@ class MusicRepository(
         .followSslRedirects(true)
         .build()
     private var qrSessionCookie: String = ""
+    private val jianyunCatalogMutex = Mutex()
+    private var jianyunCatalogSongs: List<Song>? = null
+    private var jianyunCatalogFetchedAt: Long = 0L
 
     suspend fun getDiscoverHome(): Result<DiscoverHomeResponse> = safeCall {
         val banners = api.getBanners().array("banners").mapNotNull { it.objOrNull()?.toBanner() }
@@ -90,24 +96,65 @@ class MusicRepository(
         DiscoverHomeResponse(banners = banners, playlists = playlists, dailySongs = dailySongs, newSongs = newSongs)
     }
 
-    suspend fun search(keywords: String, type: Int = 1, offset: Int = 0): Result<SearchResponse> = safeCall {
-        val result = api.search(keywords, type, offset = offset).obj("result")
-        SearchResponse(
-            songs = result.array("songs").mapNotNull { it.objOrNull()?.toSong() },
-            songCount = result.int("songCount")
+    suspend fun search(keywords: String, type: Int = 1, offset: Int = 0): Result<SearchResponse> {
+        val officialSongs = if (type == 1) getJianyunCatalogSongs() else emptyList()
+        val localSongs = JianyunOfficialContent.searchSongs(keywords, officialSongs)
+        val remoteResult = safeCall {
+            val result = api.search(keywords, type, offset = offset).obj("result")
+            SearchResponse(
+                songs = result.array("songs").mapNotNull { it.objOrNull()?.toSong() },
+                songCount = result.int("songCount")
+            )
+        }
+        return remoteResult.fold(
+            onSuccess = { remote ->
+                Result.success(
+                    if (type == 1) {
+                        JianyunOfficialContent.mergeSearchResponse(keywords, remote, officialSongs)
+                    } else {
+                        remote
+                    }
+                )
+            },
+            onFailure = { error ->
+                if (localSongs.isNotEmpty()) {
+                    Result.success(SearchResponse(songs = localSongs, songCount = localSongs.size))
+                } else {
+                    Result.failure(error)
+                }
+            }
         )
     }
 
-    suspend fun getSongDetail(ids: List<Long>): Result<List<Song>> = safeCall {
-        api.getSongDetail(ids.joinToString(",", prefix = "[", postfix = "]"))
-            .array("songs")
-            .mapNotNull { it.objOrNull()?.toSong() }
+    suspend fun getSongDetail(ids: List<Long>): Result<List<Song>> {
+        val requestedIds = ids.distinct()
+        if (requestedIds.isEmpty()) return Result.success(emptyList())
+        val officialById = if (requestedIds.any(JianyunOfficialContent::isOfficialSongId)) {
+            getJianyunCatalogSongs().associateBy(Song::id)
+        } else {
+            emptyMap()
+        }
+        val remoteIds = requestedIds.filterNot(JianyunOfficialContent::isOfficialSongId)
+        if (remoteIds.isEmpty()) {
+            return Result.success(requestedIds.mapNotNull(officialById::get))
+        }
+
+        return safeCall {
+            val remoteById = api.getSongDetail(remoteIds.joinToString(",", prefix = "[", postfix = "]"))
+                .array("songs")
+                .mapNotNull { it.objOrNull()?.toSong() }
+                .associateBy(Song::id)
+            requestedIds.mapNotNull { id ->
+                officialById[id] ?: remoteById[id]
+            }
+        }
     }
 
     override suspend fun getSimilarSongs(songId: Long): List<SimilarSong> =
         getSimilarSongsResult(songId).getOrThrow()
 
     suspend fun getSimilarSongsResult(songId: Long): Result<List<SimilarSong>> = safeCall {
+        if (JianyunOfficialContent.isOfficialSongId(songId)) return@safeCall emptyList()
         val root = api.getSimilarSongs(songId)
         if (BuildConfig.DEBUG) Log.d("SimiDebug", "similar songs root: $root")
         parseSimilarSongs(root)
@@ -125,6 +172,7 @@ class MusicRepository(
     }
 
     suspend fun getSongUrl(songId: Long, br: Int = 128000, fee: Int = 0): Result<SongUrlResponse> = safeCall {
+        getJianyunSongUrlResponse(songId, br)?.let { return@safeCall it }
         // Step 1: 先尝试从网易云官方 API 获取
         val item = api.getSongUrl("[$songId]", br).array("data").firstOrNull()?.objOrNull()
         val rawUrl = item?.string("url")
@@ -181,6 +229,7 @@ class MusicRepository(
     }
 
     suspend fun getSongUrlWithFallbackTimeout(songId: Long, br: Int = 128000, fee: Int = 0): Result<SongUrlResponse> = safeCall {
+        getJianyunSongUrlResponse(songId, br)?.let { return@safeCall it }
         val item = withTimeoutOrNull(OFFICIAL_SONG_URL_TIMEOUT_MS) {
             runCatching {
                 api.getSongUrl("[$songId]", br).array("data").firstOrNull()?.objOrNull()
@@ -219,13 +268,14 @@ class MusicRepository(
 
     /**
      * Queue preparation deliberately excludes the paid Linglan provider and its persistent cache.
-     * It resolves only through the official NetEase endpoint and then Kugou.
+     * It resolves only through direct playable sources: NetEase, Jianyun official, and Kugou.
      */
     suspend fun getSongUrlForPrefetch(
         songId: Long,
         br: Int = 128000,
         fee: Int = 0
     ): Result<SongUrlResponse> = safeCall {
+        getJianyunSongUrlResponse(songId, br)?.let { return@safeCall it }
         val item = withTimeoutOrNull(OFFICIAL_SONG_URL_TIMEOUT_MS) {
             runCatching {
                 api.getSongUrl("[$songId]", br).array("data").firstOrNull()?.objOrNull()
@@ -266,6 +316,7 @@ class MusicRepository(
         br: Int = 128000,
         excludedSources: Set<String> = emptySet()
     ): Result<SongUrlResponse> = safeCall {
+        getJianyunSongUrlResponse(songId, br)?.let { return@safeCall it }
         getBackupSongUrlInternal(songId, br, excludedSources) ?: SongUrlResponse(
             url = null,
             br = br,
@@ -377,7 +428,49 @@ class MusicRepository(
         )
     }
 
+    private suspend fun getJianyunCatalogSongs(): List<Song> = withContext(Dispatchers.IO) {
+        jianyunCatalogMutex.withLock {
+            val now = System.currentTimeMillis()
+            val cached = jianyunCatalogSongs
+            if (cached != null && now - jianyunCatalogFetchedAt < JIANYUN_CATALOG_CACHE_MS) {
+                return@withLock cached
+            }
+
+            val fetched = runCatching {
+                val request = Request.Builder()
+                    .url(JianyunOfficialContent.catalogUrl)
+                    .get()
+                    .header("Accept", "application/json")
+                    .header("User-Agent", PLAYBACK_USER_AGENT)
+                    .build()
+                qrHttp.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw IOException("简云音乐目录请求失败：HTTP ${response.code}")
+                    }
+                    JianyunOfficialContent.parseCatalog(response.body?.string().orEmpty())
+                }
+            }.getOrNull()
+
+            val resolved = fetched
+                ?.takeIf { it.isNotEmpty() }
+                ?: JianyunOfficialContent.fallbackSongs()
+            jianyunCatalogSongs = resolved
+            jianyunCatalogFetchedAt = now
+            resolved
+        }
+    }
+
+    private suspend fun getJianyunSongUrlResponse(
+        songId: Long,
+        bitrate: Int
+    ): SongUrlResponse? {
+        if (!JianyunOfficialContent.isOfficialSongId(songId)) return null
+        val song = getJianyunCatalogSongs().firstOrNull { it.id == songId } ?: return null
+        return JianyunOfficialContent.songUrlResponse(song, bitrate)
+    }
+
     suspend fun getLyric(id: Long): Result<LyricResponse> = safeCall {
+        if (JianyunOfficialContent.isOfficialSongId(id)) return@safeCall LyricResponse()
         val body = api.getLyric(id)
         LyricResponse(
             lyric = body.obj("lrc").string("lyric").orEmpty(),
@@ -387,6 +480,9 @@ class MusicRepository(
     }
 
     suspend fun getArtistDetail(id: Long): Result<ArtistDetail> = safeCall {
+        if (id == JianyunOfficialContent.ARTIST_ID) {
+            return@safeCall JianyunOfficialContent.artist(getJianyunCatalogSongs())
+        }
         require(id > 0) { "歌手 ID 无效" }
 
         val overview = api.getArtistOverview(id)

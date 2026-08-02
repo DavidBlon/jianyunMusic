@@ -80,11 +80,13 @@ import com.ncm.app.data.model.ArtistBrief
 import com.ncm.app.ui.components.ArtistLinks
 import com.ncm.app.ui.components.LinglanSourceBadge
 import com.ncm.app.util.albumArtworkUrl
+import com.ncm.app.util.albumArtworkDisplayScale
 import com.ncm.app.util.albumArtworkThumbnailCacheKey
 import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.PlayMode
 import com.ncm.app.viewmodel.PlaybackQuality
 import com.ncm.app.viewmodel.PlayerViewModel
+import kotlinx.coroutines.delay
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -183,6 +185,12 @@ fun PlayerScreen(
         val unavailableMessage = state.error?.takeIf {
             state.songUrl.isNullOrBlank() && !state.isLoading && !state.isPlaying
         }
+        val transientError = state.error?.takeUnless { it == unavailableMessage }
+        LaunchedEffect(transientError) {
+            val message = transientError ?: return@LaunchedEffect
+            delay(1_000)
+            viewModel.dismissError(message)
+        }
         if (unavailableMessage != null || componentVisibility.artwork) {
             Box(
                 modifier = Modifier
@@ -222,7 +230,7 @@ fun PlayerScreen(
             }
         }
 
-        state.error?.takeUnless { state.songUrl.isNullOrBlank() && !state.isLoading && !state.isPlaying }?.let {
+        transientError?.let {
             Text(
                 text = it,
                 style = MaterialTheme.typography.bodySmall,
@@ -425,6 +433,7 @@ private fun AudioSourceTag(source: String) {
 
     val label = when (source) {
         PlaybackSource.KUGOU -> "酷狗"
+        PlaybackSource.JIANYUN_OFFICIAL -> "简云官方"
         else -> null
     } ?: return
 
@@ -626,7 +635,13 @@ private fun Disc(
             AsyncImage(
                 model = artworkRequest,
                 contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        val scale = albumArtworkDisplayScale(coverUrl)
+                        scaleX = scale
+                        scaleY = scale
+                    },
                 contentScale = ContentScale.Crop,
                 onSuccess = { onAccentColor(extractArtworkAccent(it.result.drawable)) }
             )
@@ -652,7 +667,13 @@ private fun AlbumCover(
             AsyncImage(
                 model = artworkRequest,
                 contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        val scale = albumArtworkDisplayScale(coverUrl)
+                        scaleX = scale
+                        scaleY = scale
+                    },
                 contentScale = ContentScale.Crop,
                 onSuccess = { onAccentColor(extractArtworkAccent(it.result.drawable)) }
             )

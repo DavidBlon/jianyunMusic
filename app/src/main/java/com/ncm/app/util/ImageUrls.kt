@@ -2,6 +2,8 @@ package com.ncm.app.util
 
 private const val ALBUM_ARTWORK_SOURCE_SIZE = 700
 private const val ALBUM_ARTWORK_THUMBNAIL_SIZE = 160
+private const val JIANYUN_ALBUM_COVER_PATH = "/assets/app-icon.png"
+private const val JIANYUN_ALBUM_COVER_SCALE = 1.18f
 
 fun sizedImageUrl(url: String?, size: Int): String? {
     val clean = url?.trim()?.takeIf { it.isNotBlank() } ?: return null
@@ -14,6 +16,16 @@ fun albumArtworkUrl(url: String?): String? = sizedImageUrl(url, ALBUM_ARTWORK_SO
 
 fun albumArtworkThumbnailUrl(url: String?): String? =
     sizedImageUrl(url, ALBUM_ARTWORK_THUMBNAIL_SIZE)
+
+/** Crops the rounded white corners baked into Jianyun's shared app-icon artwork. */
+fun albumArtworkDisplayScale(url: String?): Float {
+    val clean = url?.trim()?.substringBefore("?") ?: return 1f
+    return if (clean.endsWith(JIANYUN_ALBUM_COVER_PATH, ignoreCase = true)) {
+        JIANYUN_ALBUM_COVER_SCALE
+    } else {
+        1f
+    }
+}
 
 /** Stable key used by the player to show the already decoded list thumbnail immediately. */
 fun albumArtworkThumbnailCacheKey(url: String?): String? {

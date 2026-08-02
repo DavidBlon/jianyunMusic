@@ -1,12 +1,23 @@
 package com.ncm.app
 
 import com.ncm.app.util.albumArtworkUrl
+import com.ncm.app.util.albumArtworkDisplayScale
 import com.ncm.app.util.albumArtworkThumbnailCacheKey
 import com.ncm.app.util.albumArtworkThumbnailUrl
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class ImageUrlsTest {
+
+    @Test
+    fun `Jianyun shared cover is enlarged to crop baked in white corners`() {
+        assertEquals(
+            1.18f,
+            albumArtworkDisplayScale("https://music.deltabound.top/assets/app-icon.png"),
+            0.001f
+        )
+        assertEquals(1f, albumArtworkDisplayScale("https://example.com/cover.jpg"), 0.001f)
+    }
 
     @Test
     fun `album artwork uses one canonical source url across list and player surfaces`() {

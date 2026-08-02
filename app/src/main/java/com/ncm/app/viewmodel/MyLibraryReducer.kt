@@ -21,6 +21,36 @@ internal object MyLibraryReducer {
         )
     }
 
+    fun addLocalLikedCount(playlists: List<Playlist>, localLikedCount: Int): List<Playlist> {
+        if (localLikedCount <= 0) return playlists
+        val likedPlaylistId = playlists.firstOrNull { isLikedPlaylistName(it.name) }?.id
+            ?: return playlists
+        return playlists.map { playlist ->
+            if (playlist.id == likedPlaylistId) {
+                playlist.copy(trackCount = playlist.trackCount + localLikedCount)
+            } else {
+                playlist
+            }
+        }
+    }
+
+    fun mergeLocalLikedSongs(
+        remote: PlaylistDetailUiState,
+        localSongs: List<Song>
+    ): PlaylistDetailUiState {
+        val distinctLocalSongs = localSongs.distinctBy(Song::id)
+        val additions = distinctLocalSongs.filter { local ->
+            remote.songs.none { it.id == local.id }
+        }
+        if (additions.isEmpty()) return remote
+
+        val remoteTrackCount = maxOf(remote.playlist?.trackCount ?: 0, remote.songs.size)
+        return remote.copy(
+            playlist = remote.playlist?.copy(trackCount = remoteTrackCount + additions.size),
+            songs = additions + remote.songs
+        )
+    }
+
     fun applyLikedSongChange(
         current: MyUiState,
         cachedLikedPlaylist: PlaylistDetailUiState?,

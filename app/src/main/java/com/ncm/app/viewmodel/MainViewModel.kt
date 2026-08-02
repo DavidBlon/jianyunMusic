@@ -6,7 +6,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ncm.app.NeteaseApp
 import com.ncm.app.data.AppCache
+import com.ncm.app.data.JianyunFavoriteStore
 import com.ncm.app.data.model.*
+import com.ncm.app.data.repository.JianyunOfficialContent
 import com.ncm.app.data.repository.MusicSourceKeyValidationResult
 import com.ncm.app.data.weekly.WeeklyCacheCleaner
 import com.ncm.app.data.weekly.WeeklyLogoutCoordinator
@@ -95,6 +97,7 @@ class MainViewModel : ViewModel() {
     private val repo = NeteaseApp.instance.repository
     private val session = NeteaseApp.instance.session
     private val cache = NeteaseApp.instance.cache
+    private val jianyunFavorites = JianyunFavoriteStore(cache) { session.userId }
     private val musicSourceSettings = NeteaseApp.instance.musicSourceSettings
     private val musicSourceKeyValidator = NeteaseApp.instance.musicSourceKeyValidator
 
@@ -246,26 +249,26 @@ class MainViewModel : ViewModel() {
                 isFullyLoaded = false
             )
             repo.getPlaylistTracks(id, count = 120, complete = false).onSuccess { resp ->
-                val firstState = PlaylistDetailUiState(
+                val firstState = withLocalJianyunFavorites(id, PlaylistDetailUiState(
                     playlist = resp.playlist,
                     songs = resp.tracks,
                     isLoading = resp.playlist?.trackCount?.let { resp.tracks.size < it } == true,
                     loadedPlaylistId = id,
                     isFullyLoaded = resp.playlist?.trackCount?.let { resp.tracks.size >= it } ?: true
-                )
+                ))
                 playlistCache[id] = firstState
                 _playlistState.value = firstState
                 syncLoadedPlaylistToMyState(firstState)
 
                 if (!firstState.isFullyLoaded) {
                     repo.getPlaylistTracks(id, count = 100000, complete = true).onSuccess { fullResp ->
-                        val fullState = PlaylistDetailUiState(
+                        val fullState = withLocalJianyunFavorites(id, PlaylistDetailUiState(
                             playlist = fullResp.playlist,
                             songs = fullResp.tracks,
                             isLoading = false,
                             loadedPlaylistId = id,
                             isFullyLoaded = true
-                        )
+                        ))
                         playlistCache[id] = fullState
                         if (_playlistState.value.loadedPlaylistId == id) {
                             _playlistState.value = fullState
@@ -334,7 +337,7 @@ class MainViewModel : ViewModel() {
             )
             return
         }
-        if (!force) {
+        if (!force && id != JianyunOfficialContent.ARTIST_ID) {
             artistDetailCache[id]?.let { cached ->
                 _artistDetailState.value = ArtistDetailUiState(
                     artistId = id,
@@ -372,6 +375,29 @@ class MainViewModel : ViewModel() {
 
     private fun PlaylistDetailUiState.isCompleteEnough(): Boolean {
         return loadedPlaylistId > 0 && playlist != null && songs.isNotEmpty() && isFullyLoaded
+    }
+
+    private fun withLocalJianyunFavorites(
+        playlistId: Long,
+        state: PlaylistDetailUiState
+    ): PlaylistDetailUiState {
+        val likedPlaylistId = _myState.value.playlists
+            .firstOrNull { MyLibraryReducer.isLikedPlaylistName(it.name) }
+            ?.id
+        if (playlistId != likedPlaylistId) return state
+        return MyLibraryReducer.mergeLocalLikedSongs(state, jianyunFavorites.load())
+    }
+
+    private fun stateFromRemoteLibrary(
+        profile: UserProfile,
+        playlists: List<Playlist>,
+        stats: UserStats
+    ): MyUiState {
+        val playlistsWithLocalLikes = MyLibraryReducer.addLocalLikedCount(
+            playlists = playlists,
+            localLikedCount = jianyunFavorites.load().size
+        )
+        return MyLibraryReducer.stateFrom(profile, playlistsWithLocalLikes, stats)
     }
 
     private fun syncLoadedPlaylistToMyState(state: PlaylistDetailUiState) {
@@ -588,7 +614,7 @@ class MainViewModel : ViewModel() {
             if (profile != null) {
                 repo.getUserPlaylists().onSuccess { playlists ->
                     val stats = repo.getUserStats().getOrDefault(UserStats())
-                    _myState.value = MyLibraryReducer.stateFrom(profile, playlists, stats)
+                    _myState.value = stateFromRemoteLibrary(profile, playlists, stats)
                 }.onFailure {
                     val stats = repo.getUserStats().getOrDefault(UserStats())
                     _myState.value = MyLibraryReducer.stateFrom(profile, _myState.value.playlists, stats)
@@ -599,7 +625,7 @@ class MainViewModel : ViewModel() {
                     if (p != null) {
                         repo.getUserPlaylists().onSuccess { playlists ->
                             val stats = repo.getUserStats().getOrDefault(UserStats())
-                            _myState.value = MyLibraryReducer.stateFrom(p, playlists, stats)
+                            _myState.value = stateFromRemoteLibrary(p, playlists, stats)
                         }.onFailure {
                             val stats = repo.getUserStats().getOrDefault(UserStats())
                             _myState.value = MyLibraryReducer.stateFrom(p, emptyList(), stats)

@@ -7,11 +7,13 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import com.ncm.app.NeteaseApp
+import com.ncm.app.data.JianyunFavoriteStore
 import com.ncm.app.data.cache.LinglanCachePolicy
 import com.ncm.app.data.model.PlaybackSource
 import com.ncm.app.data.model.Song
 import com.ncm.app.data.model.SongUrlResponse
 import com.ncm.app.data.model.withArtworkFrom
+import com.ncm.app.data.repository.JianyunOfficialContent
 import com.ncm.app.data.weekly.PlayEventEntity
 import com.ncm.app.playback.AppPlayer
 import kotlinx.coroutines.Job
@@ -85,6 +87,7 @@ class PlayerViewModel : ViewModel() {
     private val app = NeteaseApp.instance
     private val repo = app.repository
     private val session = app.session
+    private val jianyunFavorites = JianyunFavoriteStore(app.cache) { session.userId }
     private val _state = MutableStateFlow(PlayerUiState(quality = savedQuality()))
     val state: StateFlow<PlayerUiState> = _state
 
@@ -476,6 +479,12 @@ class PlayerViewModel : ViewModel() {
 
         val targetLiked = !_state.value.isLiked
         _state.value = _state.value.copy(isLiked = targetLiked, isLikeUpdating = true, error = null)
+        if (JianyunOfficialContent.isOfficialSongId(songId)) {
+            jianyunFavorites.update(song, targetLiked)
+            _state.value = _state.value.copy(isLiked = targetLiked, isLikeUpdating = false)
+            onChanged(song, targetLiked)
+            return
+        }
         viewModelScope.launch {
             repo.likeSong(songId, targetLiked).onSuccess { resp ->
                 if (resp.loggedIn && resp.code in 200..299) {
@@ -735,6 +744,15 @@ class PlayerViewModel : ViewModel() {
     }
 
     private fun refreshLiked(songId: Long) {
+        if (JianyunOfficialContent.isOfficialSongId(songId)) {
+            val song = _state.value.currentSong?.takeIf { it.id == songId }
+            _state.value = _state.value.copy(
+                isLiked = song?.let(jianyunFavorites::isLiked)
+                    ?: jianyunFavorites.load().any { it.id == songId },
+                isLikeUpdating = false
+            )
+            return
+        }
         viewModelScope.launch {
             repo.checkLiked(listOf(songId)).onSuccess { liked ->
                 if (_state.value.currentSong?.id == songId) {
@@ -1291,6 +1309,12 @@ class PlayerViewModel : ViewModel() {
     }
 
     private fun historyCacheKey(): String = "play_history:${session.userId}"
+
+    fun dismissError(expectedMessage: String) {
+        if (_state.value.error == expectedMessage) {
+            _state.value = _state.value.copy(error = null)
+        }
+    }
 
     private fun loadHistory(): List<Song> = app.cache.get<List<Song>>(historyCacheKey()).orEmpty()
 

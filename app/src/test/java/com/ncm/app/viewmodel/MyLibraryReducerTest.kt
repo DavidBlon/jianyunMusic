@@ -28,6 +28,35 @@ class MyLibraryReducerTest {
     }
 
     @Test
+    fun addLocalLikedCount_addsOnlyToLikedPlaylist() {
+        val playlists = MyLibraryReducer.addLocalLikedCount(
+            playlists = listOf(
+                Playlist(id = 10, name = "我喜欢的音乐", trackCount = 12),
+                Playlist(id = 20, name = "其他歌单", trackCount = 2)
+            ),
+            localLikedCount = 1
+        )
+
+        assertEquals(13, playlists.first { it.id == 10L }.trackCount)
+        assertEquals(2, playlists.first { it.id == 20L }.trackCount)
+    }
+
+    @Test
+    fun mergeLocalLikedSongs_prependsLocalSongAndAdjustsCountOnce() {
+        val remote = PlaylistDetailUiState(
+            playlist = PlaylistMeta(id = 10, name = "我喜欢的音乐", trackCount = 2),
+            songs = listOf(Song(id = 1, name = "one"), Song(id = 2, name = "two")),
+            loadedPlaylistId = 10
+        )
+        val local = Song(id = 99, name = "简云漫游")
+
+        val merged = MyLibraryReducer.mergeLocalLikedSongs(remote, listOf(local, local))
+
+        assertEquals(listOf(99L, 1L, 2L), merged.songs.map { it.id })
+        assertEquals(3, merged.playlist?.trackCount)
+    }
+
+    @Test
     fun applyLikedSongChange_addsSongToCachedLikedPlaylistOnce() {
         val current = MyUiState(
             playlists = listOf(Playlist(id = 10, name = "我喜欢的音乐", trackCount = 1)),

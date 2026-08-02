@@ -66,6 +66,11 @@ val paidMusicApiUrl = nonBlank(providers.gradleProperty("paidMusicApiUrl").orNul
     ?: paidMusicScriptConstant("API_URL")
     ?: "https://source.shiqianjiang.cn/api/music"
 
+val jianyunContentBaseUrl = nonBlank(providers.gradleProperty("jianyunContentBaseUrl").orNull)
+    ?: nonBlank(providers.environmentVariable("JIANYUN_CONTENT_BASE_URL").orNull)
+    ?: nonBlank(localProperties.getProperty("jianyunContentBaseUrl"))
+    ?: "https://music.deltabound.top/"
+
 val keystorePropertiesFile = rootProject.file("app/keystore.properties")
 val keystoreProperties = Properties()
 if (keystorePropertiesFile.exists()) {
@@ -85,6 +90,7 @@ android {
 
         buildConfigField("String", "API_BASE_URL", "\"https://music.163.com/\"")
         buildConfigField("String", "PAID_MUSIC_API_URL", buildConfigString(paidMusicApiUrl))
+        buildConfigField("String", "JIANYUN_CONTENT_BASE_URL", buildConfigString(jianyunContentBaseUrl))
     }
 
     signingConfigs {

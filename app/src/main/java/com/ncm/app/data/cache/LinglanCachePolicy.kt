@@ -36,6 +36,8 @@ object LinglanCachePolicy {
     }
 
     fun isAllowedForPrefetch(source: String): Boolean {
-        return source == PlaybackSource.NETEASE || source == PlaybackSource.KUGOU
+        return source == PlaybackSource.NETEASE ||
+            source == PlaybackSource.KUGOU ||
+            source == PlaybackSource.JIANYUN_OFFICIAL
     }
 }

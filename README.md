@@ -61,6 +61,12 @@
 
 聆澜音源的服务地址默认使用 `https://source.shiqianjiang.cn/api/music`，也可以通过 `paidMusicApiUrl`、`PAID_MUSIC_API_URL` 或根目录唯一一份 `lx-music-source-paid-*.js` 中的 `API_URL` 覆盖。卡密不再编译进 APK，由用户在首次启动引导或设置页面中输入并经服务端验证后保存。
 
+简云官方歌曲和图片默认从 `https://music.deltabound.top/` 加载；需要切换站点时，可通过 `jianyunContentBaseUrl`、`JIANYUN_CONTENT_BASE_URL` 或 `local.properties` 中的 `jianyunContentBaseUrl` 覆盖。
+
+### 简云官方歌曲目录
+
+将 [`server/jianyun-music.php`](server/jianyun-music.php) 上传到简云音乐官网根目录。该接口会自动扫描根目录下所有小写 `.mp3` 文件；文件名（不含扩展名）就是歌曲名，歌手统一为「简云官方」，封面统一使用 `assets/app-icon.png`。之后新增歌曲只需把 MP3 上传到服务器根目录，App 会在约 60 秒内从搜索和歌手详情页读取到新作品。接口不可用时会回退到内置的《简云漫游》信息。
+
 如果本机没有全局 JDK，可临时设置自己的 JDK 17 路径，例如：
 
 ```powershell

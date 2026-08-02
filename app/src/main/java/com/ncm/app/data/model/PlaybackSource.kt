@@ -8,6 +8,7 @@ object PlaybackSource {
     const val LINGLAN = "linglan-wy"
     const val LINGLAN_CACHE = "linglan-cache"
     const val KUGOU = "kugou"
+    const val JIANYUN_OFFICIAL = "jianyun-official"
 
     fun isLinglan(source: String): Boolean {
         return source == LINGLAN || source == LINGLAN_CACHE

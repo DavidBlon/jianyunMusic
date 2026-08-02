@@ -1,10 +1,9 @@
 package com.ncm.app.ui.screens.artist
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -31,16 +30,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import com.ncm.app.data.model.ArtistDetail
-import com.ncm.app.data.model.Song
+import com.ncm.app.ui.screens.playlist.SongListItem
 import com.ncm.app.ui.theme.AccentSecondary
 import com.ncm.app.ui.theme.DarkBg
 import com.ncm.app.ui.theme.Green500
@@ -51,8 +47,6 @@ import com.ncm.app.ui.theme.accentSurface
 import com.ncm.app.ui.theme.glassSurface
 import com.ncm.app.ui.theme.miniPlayerSafeBottomPadding
 import com.ncm.app.util.sizedImageUrl
-import com.ncm.app.util.albumArtworkThumbnailCacheKey
-import com.ncm.app.util.albumArtworkThumbnailUrl
 import com.ncm.app.viewmodel.MainViewModel
 
 @Composable
@@ -131,14 +125,14 @@ fun ArtistDetailScreen(
                             }
                         )
                     }
-                    itemsIndexed(
+                    items(
                         items = artist.hotSongs,
-                        key = { _, song -> song.id }
-                    ) { index, song ->
-                        ArtistSongItem(
-                            index = index + 1,
+                        key = { song -> song.id }
+                    ) { song ->
+                        SongListItem(
                             song = song,
-                            onClick = { onSongClick(song.id) }
+                            onClick = { onSongClick(song.id) },
+                            modifier = Modifier.padding(horizontal = 20.dp)
                         )
                     }
                     if (artist.hotSongs.isEmpty()) {
@@ -391,93 +385,5 @@ private fun ArtistWorksHeader(
             Spacer(Modifier.width(4.dp))
             Text("播放")
         }
-    }
-}
-
-@Composable
-private fun ArtistSongItem(
-    index: Int,
-    song: Song,
-    onClick: () -> Unit
-) {
-    val context = LocalContext.current
-    val artworkRequest = remember(context, song.album?.picUrl) {
-        val thumbnailUrl = albumArtworkThumbnailUrl(song.album?.picUrl) ?: return@remember null
-        ImageRequest.Builder(context)
-            .data(thumbnailUrl)
-            .memoryCacheKey(albumArtworkThumbnailCacheKey(song.album?.picUrl))
-            .size(160)
-            .crossfade(120)
-            .build()
-    }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            index.toString().padStart(2, '0'),
-            color = TextTertiary,
-            style = MaterialTheme.typography.labelMedium,
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Clip,
-            textAlign = TextAlign.End,
-            modifier = Modifier.width(40.dp)
-        )
-        if (artworkRequest != null) {
-            AsyncImage(
-                model = artworkRequest,
-                contentDescription = null,
-                modifier = Modifier
-                    .size(50.dp)
-                    .clip(RoundedCornerShape(10.dp)),
-                contentScale = ContentScale.Crop
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .size(50.dp)
-                    .background(AccentSecondary.copy(alpha = 0.18f), RoundedCornerShape(10.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = androidx.compose.material.icons.Icons.Outlined.MusicNote,
-                    contentDescription = null,
-                    tint = TextTertiary
-                )
-            }
-        }
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .padding(start = 12.dp)
-        ) {
-            Text(
-                song.name,
-                color = TextPrimary,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                listOf(song.artistText, song.album?.name.orEmpty())
-                    .filter { it.isNotBlank() }
-                    .joinToString(" · "),
-                style = MaterialTheme.typography.bodySmall,
-                color = TextTertiary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 3.dp)
-            )
-        }
-        Text(
-            song.durationText,
-            color = TextTertiary,
-            style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier.padding(start = 8.dp)
-        )
     }
 }
