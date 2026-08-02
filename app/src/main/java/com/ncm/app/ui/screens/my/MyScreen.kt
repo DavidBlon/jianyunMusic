@@ -39,6 +39,7 @@ import coil.compose.AsyncImage
 import com.ncm.app.data.model.Playlist
 import com.ncm.app.data.model.UserProfile
 import com.ncm.app.NeteaseApp
+import com.ncm.app.data.cache.LINGLAN_AUDIO_CACHE_MAX_MIB
 import com.ncm.app.ui.theme.*
 import com.ncm.app.ui.components.MusicSourceKeySettingsSheet
 import com.ncm.app.util.sizedImageUrl
@@ -414,7 +415,8 @@ private fun LinglanCacheSetting(
                 }
             }
             Text(
-                "仅持久保存聆澜音频（最多约 512 MB）；网易云与酷狗始终直连，不写入缓存。",
+                "仅缓存聆澜音频（上限 $LINGLAN_AUDIO_CACHE_MAX_MIB MB，系统空间不足时可能自动清理）；" +
+                    "网易云与酷狗始终直连，不写入缓存。",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextTertiary,
                 modifier = Modifier.padding(top = 8.dp)

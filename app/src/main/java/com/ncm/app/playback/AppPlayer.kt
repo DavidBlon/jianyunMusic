@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -27,7 +28,7 @@ import com.ncm.app.MainActivity
 import com.ncm.app.NeteaseApp
 import com.ncm.app.data.cache.LinglanCachePolicy
 import com.ncm.app.data.model.Song
-import com.ncm.app.util.sizedImageUrl
+import com.ncm.app.util.albumArtworkUrl
 import okhttp3.OkHttpClient
 import java.io.IOException
 
@@ -36,6 +37,12 @@ object AppPlayer {
     private const val MEDIA_EXTRA_SOURCE = "com.ncm.app.media.SOURCE"
     private const val PLAYBACK_USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.0.18.203152"
+
+    /** Media3 据此请求和响应系统音频焦点（电话、语音、短视频等）。 */
+    internal val musicAudioAttributes: AudioAttributes = AudioAttributes.Builder()
+        .setUsage(C.USAGE_MEDIA)
+        .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+        .build()
 
     private data class PlaybackSnapshot(
         val song: Song,
@@ -74,6 +81,8 @@ object AppPlayer {
                     }
                 }
             )
+            .setAudioAttributes(musicAudioAttributes, true)
+            .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .setLoadControl(
                 DefaultLoadControl.Builder()
@@ -227,7 +236,7 @@ object AppPlayer {
             .setTitle(song.name)
             .setArtist(song.artistText)
             .setAlbumTitle(song.album?.name)
-            .setArtworkUri(sizedImageUrl(song.album?.picUrl, 300)?.let(Uri::parse))
+            .setArtworkUri(albumArtworkUrl(song.album?.picUrl)?.let(Uri::parse))
             .setExtras(Bundle().apply { putString(MEDIA_EXTRA_SOURCE, source) })
             .build()
 

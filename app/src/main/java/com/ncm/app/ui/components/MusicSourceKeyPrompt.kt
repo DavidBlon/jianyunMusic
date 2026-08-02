@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -38,10 +39,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -328,6 +332,8 @@ private fun MusicSourceKeyEditor(
     modifier: Modifier = Modifier
 ) {
     val clipboard = LocalClipboardManager.current
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     var value by rememberSaveable { mutableStateOf("") }
     var status by remember { mutableStateOf<KeyInputStatus>(KeyInputStatus.Idle) }
 
@@ -344,7 +350,10 @@ private fun MusicSourceKeyEditor(
         status = KeyInputStatus.Checking
         status = when (val result = onValidateAndSave(candidate)) {
             MusicSourceKeyValidationResult.Valid ->
-                KeyInputStatus.Message("卡密验证成功，已自动启用", isError = false)
+                KeyInputStatus.Message("卡密验证成功，已自动启用", isError = false).also {
+                    focusManager.clearFocus()
+                    keyboardController?.hide()
+                }
             is MusicSourceKeyValidationResult.Invalid ->
                 KeyInputStatus.Message(result.message, isError = true)
             is MusicSourceKeyValidationResult.Unavailable ->
@@ -361,7 +370,16 @@ private fun MusicSourceKeyEditor(
             label = { Text(if (currentMaskedKey == null) "输入卡密" else "输入新卡密") },
             placeholder = { Text("粘贴购买后获得的卡密") },
             visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Password,
+                imeAction = ImeAction.Done
+            ),
+            keyboardActions = KeyboardActions(
+                onDone = {
+                    focusManager.clearFocus()
+                    keyboardController?.hide()
+                }
+            ),
             trailingIcon = {
                 TextButton(
                     onClick = {

@@ -63,6 +63,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -70,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.ncm.app.ui.theme.*
 import com.ncm.app.NeteaseApp
 import com.ncm.app.playback.AppPlayer
@@ -77,7 +79,8 @@ import com.ncm.app.data.model.PlaybackSource
 import com.ncm.app.data.model.ArtistBrief
 import com.ncm.app.ui.components.ArtistLinks
 import com.ncm.app.ui.components.LinglanSourceBadge
-import com.ncm.app.util.sizedImageUrl
+import com.ncm.app.util.albumArtworkUrl
+import com.ncm.app.util.albumArtworkThumbnailCacheKey
 import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.PlayMode
 import com.ncm.app.viewmodel.PlaybackQuality
@@ -610,6 +613,7 @@ private fun Disc(
     onAccentColor: (Color) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val artworkRequest = rememberPlayerArtworkRequest(coverUrl)
     Box(
         modifier = modifier
             .size(280.dp)
@@ -618,9 +622,9 @@ private fun Disc(
             .background(Brush.linearGradient(listOf(RedAccent, Color(0xFFC0392B)))),
         contentAlignment = Alignment.Center
     ) {
-        if (!coverUrl.isNullOrBlank()) {
+        if (artworkRequest != null) {
             AsyncImage(
-                model = sizedImageUrl(coverUrl, 700),
+                model = artworkRequest,
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
@@ -636,6 +640,7 @@ private fun AlbumCover(
     onAccentColor: (Color) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val artworkRequest = rememberPlayerArtworkRequest(coverUrl)
     Box(
         modifier = modifier
             .size(296.dp)
@@ -643,15 +648,29 @@ private fun AlbumCover(
             .background(DarkSurface2),
         contentAlignment = Alignment.Center
     ) {
-        if (!coverUrl.isNullOrBlank()) {
+        if (artworkRequest != null) {
             AsyncImage(
-                model = sizedImageUrl(coverUrl, 700),
+                model = artworkRequest,
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
                 onSuccess = { onAccentColor(extractArtworkAccent(it.result.drawable)) }
             )
         }
+    }
+}
+
+@Composable
+private fun rememberPlayerArtworkRequest(coverUrl: String?): ImageRequest? {
+    val context = LocalContext.current
+    return remember(context, coverUrl) {
+        val fullArtworkUrl = albumArtworkUrl(coverUrl) ?: return@remember null
+        ImageRequest.Builder(context)
+            .data(fullArtworkUrl)
+            .size(700)
+            .placeholderMemoryCacheKey(albumArtworkThumbnailCacheKey(coverUrl))
+            .crossfade(160)
+            .build()
     }
 }
 

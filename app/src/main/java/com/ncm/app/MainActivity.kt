@@ -59,6 +59,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
@@ -75,12 +77,16 @@ import com.ncm.app.data.update.UpdateInfo
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.ncm.app.ui.navigation.NavGraph
 import com.ncm.app.ui.navigation.Routes
+import com.ncm.app.ui.navigation.KeyboardDismissalTarget
+import com.ncm.app.ui.navigation.shouldDismissKeyboardForTransition
 import com.ncm.app.ui.components.FirstUseMusicSourcePrompt
 import com.ncm.app.ui.screens.player.PlayerScreen
 import com.ncm.app.ui.theme.*
-import com.ncm.app.util.sizedImageUrl
+import com.ncm.app.util.albumArtworkThumbnailCacheKey
+import com.ncm.app.util.albumArtworkThumbnailUrl
 import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.PlayerViewModel
 import kotlinx.coroutines.delay
@@ -169,6 +175,23 @@ fun MainApp() {
         activePlayerSongId == null &&
         playerState.currentSong != null &&
         !miniPlayerBlocked
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val keyboardDismissalTarget = KeyboardDismissalTarget(
+        route = currentRoute,
+        playerOverlaySongId = activePlayerSongId
+    )
+    var previousKeyboardDismissalTarget by remember {
+        mutableStateOf<KeyboardDismissalTarget?>(null)
+    }
+
+    LaunchedEffect(keyboardDismissalTarget) {
+        if (shouldDismissKeyboardForTransition(previousKeyboardDismissalTarget, keyboardDismissalTarget)) {
+            focusManager.clearFocus(force = true)
+            keyboardController?.hide()
+        }
+        previousKeyboardDismissalTarget = keyboardDismissalTarget
+    }
 
     LaunchedEffect(currentRoute) {
         selectedBottomRoute = retainBottomNavRoute(selectedBottomRoute, currentRoute)
@@ -697,6 +720,16 @@ fun MiniPlayer(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val coverRequest = remember(context, coverUrl) {
+        val thumbnailUrl = albumArtworkThumbnailUrl(coverUrl) ?: return@remember null
+        ImageRequest.Builder(context)
+            .data(thumbnailUrl)
+            .memoryCacheKey(albumArtworkThumbnailCacheKey(coverUrl))
+            .size(160)
+            .crossfade(120)
+            .build()
+    }
     val visibleProgress = progress.coerceIn(0f, 1f)
     val previousInteractionSource = remember { MutableInteractionSource() }
     val playPauseInteractionSource = remember { MutableInteractionSource() }
@@ -727,8 +760,8 @@ fun MiniPlayer(
                     .background(DarkBg2),
                 contentAlignment = Alignment.Center
             ) {
-                if (!coverUrl.isNullOrBlank()) {
-                    AsyncImage(sizedImageUrl(coverUrl, 120), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                if (coverRequest != null) {
+                    AsyncImage(coverRequest, null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                 }
             }
 

@@ -24,17 +24,21 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.ncm.app.data.model.ArtistDetail
 import com.ncm.app.data.model.Song
 import com.ncm.app.ui.theme.AccentSecondary
@@ -47,6 +51,8 @@ import com.ncm.app.ui.theme.accentSurface
 import com.ncm.app.ui.theme.glassSurface
 import com.ncm.app.ui.theme.miniPlayerSafeBottomPadding
 import com.ncm.app.util.sizedImageUrl
+import com.ncm.app.util.albumArtworkThumbnailCacheKey
+import com.ncm.app.util.albumArtworkThumbnailUrl
 import com.ncm.app.viewmodel.MainViewModel
 
 @Composable
@@ -394,6 +400,16 @@ private fun ArtistSongItem(
     song: Song,
     onClick: () -> Unit
 ) {
+    val context = LocalContext.current
+    val artworkRequest = remember(context, song.album?.picUrl) {
+        val thumbnailUrl = albumArtworkThumbnailUrl(song.album?.picUrl) ?: return@remember null
+        ImageRequest.Builder(context)
+            .data(thumbnailUrl)
+            .memoryCacheKey(albumArtworkThumbnailCacheKey(song.album?.picUrl))
+            .size(160)
+            .crossfade(120)
+            .build()
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -405,11 +421,15 @@ private fun ArtistSongItem(
             index.toString().padStart(2, '0'),
             color = TextTertiary,
             style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.width(32.dp)
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(40.dp)
         )
-        if (!song.album?.picUrl.isNullOrBlank()) {
+        if (artworkRequest != null) {
             AsyncImage(
-                model = sizedImageUrl(song.album?.picUrl, 140),
+                model = artworkRequest,
                 contentDescription = null,
                 modifier = Modifier
                     .size(50.dp)

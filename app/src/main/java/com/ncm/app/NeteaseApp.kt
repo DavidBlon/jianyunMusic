@@ -2,11 +2,16 @@ package com.ncm.app
 
 import android.app.Application
 import android.content.Context
+import coil.ImageLoader
+import coil.ImageLoaderFactory
+import coil.disk.DiskCache
 import com.ncm.app.data.AppCache
 import com.ncm.app.data.MusicSourceSettings
 import com.ncm.app.data.SessionManager
 import com.ncm.app.data.api.NeteaseApi
+import com.ncm.app.data.cache.COVER_IMAGE_CACHE_MAX_BYTES
 import com.ncm.app.data.cache.LinglanAudioCache
+import com.ncm.app.data.cache.coverImageCacheDirectory
 import com.ncm.app.data.repository.MusicRepository
 import com.ncm.app.data.repository.MusicSourceKeyValidator
 import com.ncm.app.data.weekly.WeeklyCacheCleaner
@@ -30,7 +35,7 @@ import java.time.ZoneId
 /** App 级协程作用域：周推荐生成/清理等后台任务用它，避免被调用方取消连带。 */
 val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-class NeteaseApp : Application() {
+class NeteaseApp : Application(), ImageLoaderFactory {
 
     lateinit var api: NeteaseApi
         private set
@@ -81,6 +86,17 @@ class NeteaseApp : Application() {
         applicationScope.launch {
             weeklyCacheCleaner.cleanupOnAppStart(session.userId)
         }
+    }
+
+    override fun newImageLoader(): ImageLoader {
+        return ImageLoader.Builder(this)
+            .diskCache {
+                DiskCache.Builder()
+                    .directory(coverImageCacheDirectory(this))
+                    .maxSizeBytes(COVER_IMAGE_CACHE_MAX_BYTES)
+                    .build()
+            }
+            .build()
     }
 
     private fun initNetwork() {

@@ -13,18 +13,20 @@ import com.ncm.app.data.weekly.WeeklyLogoutCoordinator
 import com.ncm.app.domain.weekly.GenerationKey
 import com.ncm.app.domain.weekly.GenerateWeeklyRecommendationUseCase
 import com.ncm.app.domain.weekly.WEEKLY_PLAYLIST_ID
+import com.ncm.app.domain.weekly.WeeklyRecResult
 import com.ncm.app.domain.weekly.WeeklyRecUiMapper
 import com.ncm.app.domain.weekly.WeeklyRecUiState
+import com.ncm.app.domain.weekly.canReuseWeeklyRecommendation
+import com.ncm.app.domain.weekly.restoreWeeklyRecommendationOrder
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.temporal.TemporalAdjusters
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 data class DiscoverUiState(
@@ -124,6 +126,12 @@ class MainViewModel : ViewModel() {
 
     private val _weeklyDetailLoading = MutableStateFlow(false)
     val weeklyDetailLoading: StateFlow<Boolean> = _weeklyDetailLoading
+
+    /** 已落定的结果、当前请求与已水合详情均按用户和周分隔，避免跨周复用旧内存。 */
+    private var weeklySettledKey: GenerationKey? = null
+    private var weeklyRequestedKey: GenerationKey? = null
+    private var weeklyDetailSongsKey: GenerationKey? = null
+    private var weeklyDetailLoadingKey: GenerationKey? = null
 
     private val _logoutCleanupWarning = MutableStateFlow<String?>(null)
     val logoutCleanupWarning: StateFlow<String?> = _logoutCleanupWarning
@@ -279,9 +287,17 @@ class MainViewModel : ViewModel() {
     /** 每周推荐以标准歌单详情呈现：生成落定后水合歌单，无数据/失败时给出空态文案。 */
     private fun loadWeeklyPlaylistDetail() {
         if (_playlistState.value.isLoading && _playlistState.value.loadedPlaylistId == WEEKLY_PLAYLIST_ID) return
+
+        // 先切到每周歌单的 loading 态，不能在等待推荐生成时继续展示上一个普通歌单。
+        _playlistState.value = PlaylistDetailUiState(
+            playlist = PlaylistMeta(id = WEEKLY_PLAYLIST_ID, name = "每周推荐"),
+            isLoading = true,
+            loadedPlaylistId = WEEKLY_PLAYLIST_ID
+        )
         viewModelScope.launch {
-            loadWeeklyRecommendation()
-            _weeklyRecState.filter { it !is WeeklyRecUiState.Loading }.first()
+            loadWeeklyRecommendation()?.join()
+            if (_playlistState.value.loadedPlaylistId != WEEKLY_PLAYLIST_ID) return@launch
+
             val rec = _weeklyRecState.value
             val count = (rec as? WeeklyRecUiState.Success)?.songs?.size ?: 0
             val cover = (rec as? WeeklyRecUiState.Success)?.songs?.firstOrNull()?.cover
@@ -291,12 +307,8 @@ class MainViewModel : ViewModel() {
                 cover = cover,
                 trackCount = count
             )
-            _playlistState.value = PlaylistDetailUiState(
-                playlist = meta,
-                isLoading = true,
-                loadedPlaylistId = WEEKLY_PLAYLIST_ID
-            )
             val songs = hydrateWeeklyDetailSongsNow().orEmpty()
+            if (_playlistState.value.loadedPlaylistId != WEEKLY_PLAYLIST_ID) return@launch
             val error = when (rec) {
                 is WeeklyRecUiState.InsufficientData -> "本周听歌数据不足，多听几首下周再来"
                 is WeeklyRecUiState.Error -> rec.message
@@ -474,24 +486,50 @@ class MainViewModel : ViewModel() {
     private fun loadSearchHistory(): List<String> =
         cache.get<List<String>>(AppCache.KEY_SEARCH_HISTORY_PREFIX + session.userId).orEmpty()
 
-    fun loadWeeklyRecommendation() {
-        if (_weeklyRecState.value is WeeklyRecUiState.Success ||
-            _weeklyRecState.value is WeeklyRecUiState.InsufficientData
-        ) return
-        val userId = session.userId
-        if (userId <= 0 || !session.isLoggedIn) {
+    fun loadWeeklyRecommendation(): Job? {
+        val key = currentWeeklyGenerationKey()
+        if (key == null) {
             _weeklyRecState.value = WeeklyRecUiState.Loading
-            return
+            weeklySettledKey = null
+            weeklyRequestedKey = null
+            return null
         }
-        viewModelScope.launch {
-            val zoneId = ZoneId.systemDefault()
-            val displayWeekStart = LocalDate.now(zoneId)
+
+        if (canReuseWeeklyRecommendation(_weeklyRecState.value, weeklySettledKey, key)) {
+            return null
+        }
+
+        weeklyRequestedKey = key
+        if (weeklyDetailSongsKey != key) {
+            _weeklyDetailSongs.value = null
+            weeklyDetailSongsKey = null
+        }
+        // Error 重试必须先进入 Loading，详情页才会等待新的请求，而不是读取旧 Error。
+        _weeklyRecState.value = WeeklyRecUiState.Loading
+        return viewModelScope.launch {
+            val result = try {
+                generateWeeklyRecommendationUseCase.execute(key)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                WeeklyRecResult.Failure(e.message)
+            }
+            if (weeklyRequestedKey == key) {
+                weeklySettledKey = key
+                _weeklyRecState.value = WeeklyRecUiMapper.toUiState(result)
+            }
+        }
+    }
+
+    private fun currentWeeklyGenerationKey(): GenerationKey? {
+        val userId = session.userId
+        if (userId <= 0 || !session.isLoggedIn) return null
+        val zoneId = ZoneId.systemDefault()
+        return GenerationKey(
+            userId = userId,
+            displayWeekStart = LocalDate.now(zoneId)
                 .with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
-            val result = generateWeeklyRecommendationUseCase.execute(
-                GenerationKey(userId = userId, displayWeekStart = displayWeekStart)
-            )
-            _weeklyRecState.value = WeeklyRecUiMapper.toUiState(result)
-        }
+        )
     }
 
     fun cleanupWeeklyCacheOnPageOpen() {
@@ -504,27 +542,34 @@ class MainViewModel : ViewModel() {
 
     /** 详情页水合：返回整份歌单的完整 Song 列表（含封面）。已加载或加载中直接返回。 */
     suspend fun hydrateWeeklyDetailSongsNow(): List<Song>? {
-        _weeklyDetailSongs.value?.takeIf { it.isNotEmpty() }?.let { return it }
-        if (_weeklyDetailLoading.value) return null
+        val key = weeklySettledKey ?: return null
+        _weeklyDetailSongs.value
+            ?.takeIf { it.isNotEmpty() && weeklyDetailSongsKey == key }
+            ?.let { return it }
+        if (_weeklyDetailLoading.value && weeklyDetailLoadingKey == key) return null
         _weeklyDetailLoading.value = true
+        weeklyDetailLoadingKey = key
         return try {
             val state = _weeklyRecState.value
             val ids = (state as? WeeklyRecUiState.Success)?.songs?.map { it.songId }.orEmpty()
             if (ids.isEmpty()) {
-                _weeklyDetailSongs.value = null
                 null
             } else {
                 val loaded = repo.getSongDetail(ids).getOrNull().orEmpty()
-                if (loaded.isEmpty()) {
-                    _weeklyDetailSongs.value = null
+                val ordered = restoreWeeklyRecommendationOrder(ids, loaded)
+                if (ordered.isEmpty() || weeklySettledKey != key) {
                     null
                 } else {
-                    _weeklyDetailSongs.value = loaded
-                    loaded
+                    _weeklyDetailSongs.value = ordered
+                    weeklyDetailSongsKey = key
+                    ordered
                 }
             }
         } finally {
-            _weeklyDetailLoading.value = false
+            if (weeklyDetailLoadingKey == key) {
+                _weeklyDetailLoading.value = false
+                weeklyDetailLoadingKey = null
+            }
         }
     }
 
@@ -724,8 +769,12 @@ class MainViewModel : ViewModel() {
             _loginState.value = LoginUiState()
             _myState.value = MyUiState(isLoading = false)
             _weeklyRecState.value = WeeklyRecUiState.Loading
+            weeklySettledKey = null
+            weeklyRequestedKey = null
             _weeklyDetailSongs.value = null
+            weeklyDetailSongsKey = null
             _weeklyDetailLoading.value = false
+            weeklyDetailLoadingKey = null
             playlistCache.clear()
             artistDetailCache.clear()
             quickListCache.clear()

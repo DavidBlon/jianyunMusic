@@ -1,8 +1,9 @@
 package com.ncm.app.data.cache
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
 import androidx.media3.common.C
-import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.database.DatabaseProvider
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.ContentMetadata
@@ -36,26 +37,25 @@ data class CachedLinglanAudio(
 )
 
 /**
- * The only persistent playback cache in the app.
+ * The only playback cache in the app.
  *
  * NetEase and Kugou media items never receive one of these cache keys, so AppPlayer routes them
- * straight to the network. Linglan entries live in noBackupFilesDir: they survive restarts but are
- * not copied into Android cloud backups.
+ * straight to the network. Linglan entries live in cacheDir and Android reports them as cache.
  */
 class LinglanAudioCache(context: Context) {
     private companion object {
-        private const val CACHE_DIRECTORY = "linglan_audio_cache"
         private const val LEGACY_UNIVERSAL_CACHE_DIRECTORY = "media"
         private const val ORIGIN_URL_METADATA = "com.ncm.app.linglan.ORIGIN_URL"
-        private const val MAX_CACHE_BYTES = 512L * 1024L * 1024L
         private const val CACHE_ONLY_HOST = "linglan-cache.invalid"
         private const val BACKGROUND_FILL_DELAY_MS = 2_500L
+        private const val MIGRATION_DIRECTORY_SUFFIX = ".migrating"
     }
 
     private val lock = Any()
     private val fillScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val fillJobs = mutableMapOf<String, Job>()
     private val fillWriters = mutableMapOf<String, CacheWriter>()
+    private val databaseProvider: CacheDirectoryDatabaseProvider
 
     val cache: SimpleCache
 
@@ -67,11 +67,124 @@ class LinglanAudioCache(context: Context) {
                 .takeIf(File::exists)
                 ?.deleteRecursively()
         }
+        migrateLegacyAudioCache(context)
+        migrateLegacyAudioIndexDatabase(context)
+        val cacheDatabaseFile = linglanAudioCacheDatabaseFile(context)
+        cacheDatabaseFile.parentFile?.mkdirs()
+        databaseProvider = CacheDirectoryDatabaseProvider(cacheDatabaseFile)
         cache = SimpleCache(
-            File(context.noBackupFilesDir, CACHE_DIRECTORY),
-            LeastRecentlyUsedCacheEvictor(MAX_CACHE_BYTES),
-            StandaloneDatabaseProvider(context)
+            linglanAudioCacheDirectory(context),
+            LeastRecentlyUsedCacheEvictor(LINGLAN_AUDIO_CACHE_MAX_BYTES),
+            databaseProvider
         )
+    }
+
+    /** Moves the old no_backup cache into cacheDir without downloading the songs again. */
+    private fun migrateLegacyAudioCache(context: Context) {
+        val source = legacyLinglanAudioCacheDirectory(context)
+        val target = linglanAudioCacheDirectory(context)
+        if (!source.exists()) return
+
+        if (target.exists()) {
+            if (target.listFiles().isNullOrEmpty()) {
+                target.deleteRecursively()
+                if (moveDirectory(source, target)) return
+            }
+
+            // The cacheDir copy is authoritative. An old no_backup copy is otherwise orphaned and
+            // would continue to be counted as user data forever.
+            source.deleteRecursively()
+            return
+        }
+
+        moveDirectory(source, target)
+    }
+
+    private fun moveDirectory(source: File, target: File): Boolean {
+        target.parentFile?.mkdirs()
+        if (source.renameTo(target)) return true
+
+        // renameTo should normally work inside app storage. Keep a staged copy fallback for devices
+        // whose filesystem refuses a directory rename, and only remove the source after success.
+        val staging = File(target.parentFile, target.name + MIGRATION_DIRECTORY_SUFFIX)
+        return runCatching {
+            staging.deleteRecursively()
+            check(source.copyRecursively(staging, overwrite = true))
+            check(staging.renameTo(target))
+            check(source.deleteRecursively())
+            true
+        }.onFailure {
+            staging.deleteRecursively()
+        }.getOrDefault(false)
+    }
+
+    /** Moves Media3's index beside the audio files so it is also classified as cache. */
+    private fun migrateLegacyAudioIndexDatabase(context: Context) {
+        val source = context.getDatabasePath(LINGLAN_AUDIO_CACHE_DATABASE_NAME)
+        val target = linglanAudioCacheDatabaseFile(context)
+        val suffixes = listOf("", "-journal", "-wal", "-shm")
+        val sourceFiles = suffixes.map { suffix -> File(source.path + suffix) }
+        if (sourceFiles.none(File::exists)) return
+
+        target.parentFile?.mkdirs()
+        if (target.exists()) {
+            context.deleteDatabase(LINGLAN_AUDIO_CACHE_DATABASE_NAME)
+            sourceFiles.forEach(File::delete)
+            return
+        }
+
+        val moved = suffixes.all { suffix ->
+            val sourceFile = File(source.path + suffix)
+            if (!sourceFile.exists()) {
+                true
+            } else {
+                val targetFile = File(target.path + suffix)
+                sourceFile.renameTo(targetFile) || runCatching {
+                    sourceFile.copyTo(targetFile, overwrite = false)
+                    sourceFile.delete()
+                }.getOrDefault(false)
+            }
+        }
+
+        if (!moved) {
+            // A partial raw database move cannot be trusted. Delete both indexes; SimpleCache will
+            // rebuild a valid cache-scoped index rather than continuing to write under user data.
+            context.deleteDatabase(LINGLAN_AUDIO_CACHE_DATABASE_NAME)
+            sourceFiles.forEach(File::delete)
+            suffixes.forEach { suffix -> File(target.path + suffix).delete() }
+        }
+    }
+
+    private class CacheDirectoryDatabaseProvider(
+        private val databaseFile: File
+    ) : DatabaseProvider {
+        private var database: SQLiteDatabase? = null
+
+        @Synchronized
+        override fun getWritableDatabase(): SQLiteDatabase = openDatabase()
+
+        @Synchronized
+        override fun getReadableDatabase(): SQLiteDatabase = openDatabase()
+
+        private fun openDatabase(): SQLiteDatabase {
+            database?.takeIf(SQLiteDatabase::isOpen)?.let { return it }
+            databaseFile.parentFile?.mkdirs()
+            return SQLiteDatabase.openOrCreateDatabase(databaseFile, null).also {
+                database = it
+            }
+        }
+
+        @Synchronized
+        fun close() {
+            database?.close()
+            database = null
+        }
+    }
+
+    internal fun release() {
+        cancelPendingWrites()
+        cache.release()
+        databaseProvider.close()
     }
 
     fun cacheKey(songId: Long, bitrate: Int): String {

@@ -1,16 +1,21 @@
 package com.ncm.app.ui.screens.playlist
 
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -20,20 +25,34 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.imageLoader
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.ncm.app.data.model.Song
 import com.ncm.app.ui.theme.*
+import com.ncm.app.util.albumArtworkThumbnailCacheKey
+import com.ncm.app.util.albumArtworkThumbnailUrl
 import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
+import kotlinx.coroutines.flow.distinctUntilChanged
+
+private const val PLAYLIST_ARTWORK_PREFETCH_AHEAD = 6
+private const val PLAYLIST_ARTWORK_DECODE_SIZE_PX = 160
 
 @Composable
 fun PlaylistDetailScreen(
@@ -56,9 +75,28 @@ fun PlaylistDetailScreen(
             }
         }
     }
+    val context = LocalContext.current
+    val imageLoader = context.imageLoader
+    val listState = rememberLazyListState()
 
     LaunchedEffect(playlistId) {
         viewModel.loadPlaylistDetail(playlistId)
+    }
+
+    LaunchedEffect(playlistId, state.loadedPlaylistId, visibleSongs) {
+        if (state.loadedPlaylistId != playlistId) return@LaunchedEffect
+        snapshotFlow {
+            listState.layoutInfo.visibleItemsInfo.mapNotNull { item -> item.key as? Long }
+        }
+            .distinctUntilChanged()
+            .collect { visibleSongIds ->
+                val lastVisibleSongIndex = visibleSongs.indexOfLast { song -> song.id in visibleSongIds }
+                visibleSongs
+                    .drop((lastVisibleSongIndex + 1).coerceAtLeast(0))
+                    .take(PLAYLIST_ARTWORK_PREFETCH_AHEAD)
+                    .mapNotNull { song -> playlistArtworkRequest(context, song.album?.picUrl) }
+                    .forEach { request -> imageLoader.enqueue(request) }
+            }
     }
 
     Box(
@@ -66,6 +104,7 @@ fun PlaylistDetailScreen(
             .fillMaxSize()
     ) {
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = miniPlayerSafeBottomPadding())
         ) {
@@ -153,12 +192,11 @@ fun PlaylistDetailScreen(
                     }
                 }
             } else {
-                itemsIndexed(
+                items(
                     items = visibleSongs,
-                    key = { _, song -> song.id }
-                ) { index, song ->
+                    key = { song -> song.id }
+                ) { song ->
                     SongListItem(
-                        index = index + 1,
                         song = song,
                         onClick = { onSongClick(song.id) },
                         modifier = Modifier.padding(horizontal = 20.dp)
@@ -181,6 +219,8 @@ private fun PlaylistHeader(
     onSearchQueryChange: (String) -> Unit,
     onCloseSearch: () -> Unit
 ) {
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -247,6 +287,13 @@ private fun PlaylistHeader(
                         textStyle = MaterialTheme.typography.bodyMedium.copy(color = Color.White),
                         cursorBrush = Brush.verticalGradient(listOf(Green500, Green500)),
                         modifier = Modifier.weight(1f),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(
+                            onSearch = {
+                                focusManager.clearFocus()
+                                keyboardController?.hide()
+                            }
+                        ),
                         decorationBox = { innerTextField ->
                             Box(contentAlignment = Alignment.CenterStart) {
                                 if (searchQuery.isBlank()) {
@@ -260,7 +307,14 @@ private fun PlaylistHeader(
                             }
                         }
                     )
-                    IconButton(onClick = onCloseSearch, modifier = Modifier.size(30.dp)) {
+                    IconButton(
+                        onClick = {
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
+                            onCloseSearch()
+                        },
+                        modifier = Modifier.size(30.dp)
+                    ) {
                         Icon(
                             imageVector = androidx.compose.material.icons.Icons.Outlined.Close,
                             contentDescription = null,
@@ -317,11 +371,15 @@ private fun PlaylistHeader(
 
 @Composable
 fun SongListItem(
-    index: Int,
     song: Song,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val artworkRequest = remember(context, song.album?.picUrl) {
+        playlistArtworkRequest(context, song.album?.picUrl)
+    }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -329,12 +387,29 @@ fun SongListItem(
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = index.toString(),
-            style = MaterialTheme.typography.titleMedium,
-            color = TextTertiary,
-            modifier = Modifier.width(28.dp)
-        )
+        Box(
+            modifier = Modifier
+                .size(50.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(AccentSecondary.copy(alpha = 0.18f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = androidx.compose.material.icons.Icons.Outlined.MusicNote,
+                contentDescription = null,
+                tint = TextTertiary,
+                modifier = Modifier.size(22.dp)
+            )
+            if (artworkRequest != null) {
+                AsyncImage(
+                    model = artworkRequest,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
 
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -365,4 +440,14 @@ fun SongListItem(
     }
 
     HorizontalDivider(color = DarkBorder, thickness = 0.5.dp, modifier = modifier)
+}
+
+private fun playlistArtworkRequest(context: Context, coverUrl: String?): ImageRequest? {
+    val thumbnailUrl = albumArtworkThumbnailUrl(coverUrl) ?: return null
+    return ImageRequest.Builder(context)
+        .data(thumbnailUrl)
+        .memoryCacheKey(albumArtworkThumbnailCacheKey(coverUrl))
+        .size(PLAYLIST_ARTWORK_DECODE_SIZE_PX)
+        .crossfade(120)
+        .build()
 }
