@@ -7,7 +7,7 @@
 
 当前版本：**1.4.0**（Android 8.0 及以上）
 
-- [下载 JianYunMusic v1.4.0 APK](release/JianYunMusic-v1.4.0.apk)
+- [下载 JianYunMusic v1.4.0 APK]([release/JianYunMusic-v1.4.0.apk](https://music.deltabound.top/downloads/JianYunMusic-v1.4.0.apk))
 
 ## 1.4.0 更新
 
