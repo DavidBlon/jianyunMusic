@@ -42,11 +42,13 @@ import com.ncm.app.NeteaseApp
 import com.ncm.app.data.cache.LINGLAN_AUDIO_CACHE_MAX_MIB
 import com.ncm.app.ui.theme.*
 import com.ncm.app.ui.components.MusicSourceKeySettingsSheet
+import com.ncm.app.ui.screens.settings.OnlineMusicSourceSection
 import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.domain.weekly.WEEKLY_PLAYLIST_ID
 import com.ncm.app.domain.weekly.weeklyRow
 import com.ncm.app.viewmodel.LinglanCacheUiState
 import com.ncm.app.viewmodel.MainViewModel
+import com.ncm.app.viewmodel.OnlineMusicSourceViewModel
 import com.ncm.app.viewmodel.PlayerViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -57,6 +59,7 @@ fun MyScreen(
     onLogout: () -> Unit,
     onDisclaimerClick: () -> Unit,
     playerViewModel: PlayerViewModel,
+    onlineSourceViewModel: OnlineMusicSourceViewModel,
     viewModel: MainViewModel = viewModel()
 ) {
     val state by viewModel.myState.collectAsState()
@@ -77,6 +80,7 @@ fun MyScreen(
     var showThemePicker by remember { mutableStateOf(false) }
     var showBackgroundSettings by remember { mutableStateOf(false) }
     var showMusicSourceSettings by remember { mutableStateOf(false) }
+    var showOnlineSourceSettings by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
@@ -178,6 +182,10 @@ fun MyScreen(
                 showAppearanceSettings = false
                 showMusicSourceSettings = true
             },
+            onOnlineSourceClick = {
+                showAppearanceSettings = false
+                showOnlineSourceSettings = true
+            },
             onDisclaimerClick = {
                 showAppearanceSettings = false
                 onDisclaimerClick()
@@ -243,6 +251,15 @@ fun MyScreen(
             onDismiss = { showMusicSourceSettings = false }
         )
     }
+
+    if (showOnlineSourceSettings) {
+        ModalBottomSheet(
+            onDismissRequest = { showOnlineSourceSettings = false },
+            containerColor = GlassSurfaceStrong
+        ) {
+            OnlineMusicSourceSection(viewModel = onlineSourceViewModel)
+        }
+    }
 }
 
 @Composable
@@ -285,6 +302,7 @@ private fun SettingsSheet(
     onBackgroundClick: () -> Unit,
     onThemeClick: () -> Unit,
     onMusicSourceKeyClick: () -> Unit,
+    onOnlineSourceClick: () -> Unit,
     onDisclaimerClick: () -> Unit,
     onClearCache: () -> Unit,
     onDismiss: () -> Unit
@@ -321,6 +339,11 @@ private fun SettingsSheet(
                 label = "备用音源卡密",
                 value = musicSourceKeyStatus,
                 onClick = onMusicSourceKeyClick
+            )
+            AppearanceSettingRow(
+                label = "在线音乐来源",
+                value = "连接聆澜 · 单选来源",
+                onClick = onOnlineSourceClick
             )
             AppearanceSettingRow(
                 label = "免责声明",

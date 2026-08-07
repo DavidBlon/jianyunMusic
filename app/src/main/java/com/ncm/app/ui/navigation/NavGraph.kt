@@ -4,12 +4,21 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
+import com.ncm.app.BuildConfig
+import com.ncm.app.data.store.MusicSourceSettings
+import com.ncm.app.plugin.credential.KeystoreSecretVault
+import com.ncm.app.plugin.credential.LinglanCredentialStore
+import com.ncm.app.plugin.manifest.LinglanAuthClient
+import com.ncm.app.plugin.runtime.InMemoryPluginRuntime
 import com.ncm.app.ui.screens.discover.DiscoverScreen
 import com.ncm.app.ui.screens.artist.ArtistDetailScreen
 import com.ncm.app.ui.screens.login.LoginScreen
@@ -19,7 +28,9 @@ import com.ncm.app.ui.screens.playlist.PlaylistDetailScreen
 import com.ncm.app.ui.screens.quick.QuickListScreen
 import com.ncm.app.ui.screens.search.SearchScreen
 import com.ncm.app.viewmodel.MainViewModel
+import com.ncm.app.viewmodel.OnlineMusicSourceViewModel
 import com.ncm.app.viewmodel.PlayerViewModel
+import com.ncm.app.viewmodel.sampleManifest
 
 object Routes {
     const val DISCOVER = "discover"
@@ -37,6 +48,9 @@ object Routes {
     fun quick(type: String) = "quick/$type"
     fun artistDetail(id: Long) = "artist/$id"
 }
+
+/** 聆澜授权密钥的 Keystore 别名；对应文件 vault_linglan_auth.dat（已在备份排除规则中）。 */
+private const val LINGLAN_AUTH_ALIAS = "linglan_auth"
 
 @Composable
 fun NavGraph(
@@ -151,6 +165,35 @@ fun NavGraph(
         }
 
         composable(Routes.MY) {
+            val context = LocalContext.current
+            val okHttpClient = remember { okhttp3.OkHttpClient() }
+            val onlineSourceViewModel: OnlineMusicSourceViewModel = viewModel {
+                OnlineMusicSourceViewModel(
+                    // 阶段 2 用假清单；阶段 3 由 LinglanManifestClient 替换
+                    manifestProvider = { sampleManifest() },
+                    runtime = InMemoryPluginRuntime(emptyMap()),
+                    authClient = LinglanAuthClient(
+                        endpoint = BuildConfig.PAID_MUSIC_API_URL
+                            .removeSuffix("/music")
+                            .takeIf { it.startsWith("https://") }
+                            ?.let { "$it/script?checkUpdate=jiany-music-android" }
+                            ?: LinglanAuthClient.DEFAULT_ENDPOINT,
+                        http = { url, secret ->
+                            // 密钥经请求头传递，不进查询参数（GC #4 / spec §8.3）
+                            val request = okhttp3.Request.Builder()
+                                .url(url)
+                                .header("X-API-Key", secret)
+                                .header("User-Agent", "JianYunMusic/${BuildConfig.VERSION_NAME}")
+                                .build()
+                            okHttpClient.newCall(request).execute().use { it.body?.string() ?: "" }
+                        }
+                    ),
+                    credentialStore = LinglanCredentialStore(
+                        KeystoreSecretVault(context.applicationContext, LINGLAN_AUTH_ALIAS)
+                    ),
+                    settings = MusicSourceSettings(context.applicationContext)
+                )
+            }
             MyScreen(
                 onPlaylistClick = { id -> navController.navigate(Routes.playlistDetail(id)) },
                 onSongClick = onOpenPlayer,
@@ -161,7 +204,8 @@ fun NavGraph(
                     navController.navigate(Routes.DISCLAIMER)
                 },
                 playerViewModel = playerViewModel,
-                viewModel = mainViewModel
+                viewModel = mainViewModel,
+                onlineSourceViewModel = onlineSourceViewModel
             )
         }
 
