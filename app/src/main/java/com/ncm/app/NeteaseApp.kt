@@ -20,12 +20,18 @@ import com.ncm.app.data.weekly.WeeklyDatabase
 import com.ncm.app.domain.weekly.GenerateWeeklyRecommendationUseCase
 import com.ncm.app.plugin.PlaybackResolver
 import com.ncm.app.plugin.PluginSearchService
+import com.ncm.app.plugin.credential.KeystoreSecretVault
+import com.ncm.app.plugin.credential.LinglanCredentialStore
+import com.ncm.app.plugin.registry.PluginRegistry
+import com.ncm.app.plugin.registry.RegistryPluginRuntime
 import com.ncm.app.plugin.runtime.ControlledHttpBridge
 import com.ncm.app.plugin.runtime.HttpExecutor
 import com.ncm.app.plugin.runtime.HttpRequestSpec
 import com.ncm.app.plugin.runtime.HttpResult
-import com.ncm.app.plugin.runtime.InMemoryPluginRuntime
 import com.ncm.app.plugin.runtime.PluginRuntime
+import com.ncm.app.plugin.runtime.PluginScriptCache
+import com.ncm.app.plugin.runtime.QuickJsPluginRuntime
+import com.ncm.app.plugin.security.ManifestSignatureVerifier
 import com.ncm.app.plugin.security.SsrfGuard
 import com.ncm.app.ui.theme.AccentThemeSettings
 import com.ncm.app.ui.theme.PlayerAppearanceSettings
@@ -36,6 +42,8 @@ import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import java.io.File
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.time.ZoneId
 
@@ -76,6 +84,8 @@ class NeteaseApp : Application(), ImageLoaderFactory {
 
     // ---- 插件宿主（阶段 4 组装；阶段 6 由 PluginRegistry + QuickJsPluginRuntime 驱动）----
     lateinit var onlineSourceSettings: com.ncm.app.data.store.MusicSourceSettings
+        private set
+    lateinit var pluginRegistry: com.ncm.app.plugin.registry.PluginRegistry
         private set
     lateinit var pluginRuntime: PluginRuntime
         private set
@@ -119,9 +129,9 @@ class NeteaseApp : Application(), ImageLoaderFactory {
     }
 
     /**
-     * 插件宿主组装：受控 HTTP 桥（SSRF 前置校验；DNS 重绑定防护在阶段 7 的
-     * 自定义 DNS 层补全）+ 播放解析器 + 搜索服务。当前运行时为内存占位，
-     * 真实脚本的下载/校验/装载由 PluginRegistry 驱动（阶段 6 接线到设置页选择来源）。
+     * 插件宿主组装：受控 HTTP 桥（SSRF 前置校验）+ PluginRegistry（下载/签名门禁/两步装载）
+     * + 播放解析器 + 搜索服务。真实脚本联调前置（§17：稳定清单 ID、签名信任根、授权状态机）
+     * 未满足前，选择来源会得到明确的「签名门禁未就绪」错误，不会静默失败。
      */
     private fun initPluginHost() {
         onlineSourceSettings = com.ncm.app.data.store.MusicSourceSettings(this)
@@ -151,7 +161,35 @@ class NeteaseApp : Application(), ImageLoaderFactory {
             executor = pluginHttpExecutor
         )
 
-        pluginRuntime = InMemoryPluginRuntime(emptyMap())
+        // 脚本缓存键 = 用户授权身份的不可逆摘要（GC #10）：从 Keystore 密钥派生，绝不用原始密钥
+        val identityDigest = runCatching {
+            val secret = LinglanCredentialStore(
+                KeystoreSecretVault(this, LINGLAN_AUTH_ALIAS)
+            ).read().orEmpty()
+            ManifestSignatureVerifier.sha256Hex(secret.ifBlank { "anonymous" })
+        }.getOrDefault(ManifestSignatureVerifier.sha256Hex("anonymous"))
+        val scriptCache = PluginScriptCache(
+            dir = File(filesDir, "plugins").apply { mkdirs() },
+            identityDigest = identityDigest
+        )
+        pluginRegistry = PluginRegistry(
+            runtimeFactory = { pluginId, script, hostParams ->
+                QuickJsPluginRuntime(pluginId, script, hostParams)
+            },
+            downloader = { url ->
+                val request = Request.Builder().url(url).get().build()
+                pluginHttp.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw IOException("插件下载失败：HTTP ${response.code}")
+                    }
+                    response.body?.bytes() ?: byteArrayOf()
+                }
+            },
+            verifier = ManifestSignatureVerifier(trustRootB64 = "", now = { System.currentTimeMillis() }),
+            cache = scriptCache
+        )
+
+        pluginRuntime = RegistryPluginRuntime(pluginRegistry)
         playbackResolver = PlaybackResolver(pluginRuntime, SsrfGuard())
         pluginSearchService = PluginSearchService(pluginRuntime) { onlineSourceSettings.currentPluginId }
         repository = MusicRepository(pluginSearchService)
@@ -177,5 +215,8 @@ class NeteaseApp : Application(), ImageLoaderFactory {
     companion object {
         lateinit var instance: NeteaseApp
             private set
+
+        /** 聆澜授权密钥的 Keystore 别名（与设置页一致；对应文件已排除备份）。 */
+        private const val LINGLAN_AUTH_ALIAS = "linglan_auth"
     }
 }

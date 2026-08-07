@@ -60,6 +60,7 @@ data class SearchUiState(
     val results: List<Song> = emptyList(),                 // 本地（简云官方）
     val pluginResults: List<OnlineTrack> = emptyList(),    // 当前来源插件结果（单来源，GC #6）
     val pluginSourceLabel: String? = null,
+    val pluginError: String? = null,                       // 插件搜索失败原因（不静默切换，GC #6）
     val isSearching: Boolean = false,
     val isCommitted: Boolean = false,
     val history: List<String> = emptyList(),
@@ -319,21 +320,21 @@ class MainViewModel : ViewModel() {
                 query = trimmed,
                 results = emptyList(),
                 pluginResults = emptyList(),
+                pluginError = null,
                 isSearching = true,
                 isCommitted = committed
             )
             val sourceLabel = onlineSourceSettings.currentPluginId
             val localDeferred = async { repo.search(trimmed).getOrDefault(SearchResponse()) }
-            val pluginDeferred = async {
-                repo.searchFromPlugin(trimmed, page = 1, type = "music").getOrNull()
-            }
+            val pluginDeferred = async { repo.searchFromPlugin(trimmed, page = 1, type = "music") }
             val local = localDeferred.await()
             val plugin = pluginDeferred.await()
             if (generation == searchGeneration && _searchState.value.query == trimmed) {
                 _searchState.value = _searchState.value.copy(
                     results = local.songs,
-                    pluginResults = plugin?.items.orEmpty(),
+                    pluginResults = plugin.getOrNull()?.items.orEmpty(),
                     pluginSourceLabel = sourceLabel?.let(::sourceLabel),
+                    pluginError = sourceLabel?.let { plugin.exceptionOrNull()?.message },
                     isSearching = false
                 )
             }
@@ -355,6 +356,7 @@ class MainViewModel : ViewModel() {
             results = emptyList(),
             pluginResults = emptyList(),
             pluginSourceLabel = null,
+            pluginError = null,
             isSearching = false,
             isCommitted = false
         )

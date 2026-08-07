@@ -134,6 +134,26 @@ fun SearchScreen(
                         onClick = { onPluginSongClick(track) }
                     )
                 }
+                if (state.isCommitted && state.pluginSourceLabel != null && state.pluginError != null) {
+                    item {
+                        Text(
+                            text = "在线来源搜索失败：${state.pluginError}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 10.dp)
+                        )
+                    }
+                }
+                if (state.isCommitted && state.pluginSourceLabel == null) {
+                    item {
+                        Text(
+                            text = "未连接在线音乐来源：可到「设置 → 在线音乐来源」连接后搜索",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextTertiary,
+                            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 10.dp)
+                        )
+                    }
+                }
                 if (!state.isSearching && state.results.isEmpty() && state.pluginResults.isEmpty() && state.isCommitted) {
                     item {
                         Text(

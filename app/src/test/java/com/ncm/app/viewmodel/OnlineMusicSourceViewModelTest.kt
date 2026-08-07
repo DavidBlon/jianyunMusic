@@ -69,4 +69,89 @@ class OnlineMusicSourceViewModelTest {
         assertEquals(null, vm.uiState.value.selectedPluginId)
         assertEquals(false, runtime.isHealthy())
     }
+
+    @Test
+    fun selectSourceThroughRegistryFailsWithoutTrustRootAndRestoresPrevious() = runTest(dispatcher) {
+        // 无信任根 → 签名门禁拒绝装载；失败必须恢复上一个当前来源并给出错误（GC #13）
+        val registry = com.ncm.app.plugin.registry.PluginRegistry(
+            runtimeFactory = { _, _, _ -> throw UnsupportedOperationException("不应到达") },
+            downloader = { "script".toByteArray() },
+            verifier = com.ncm.app.plugin.security.ManifestSignatureVerifier(trustRootB64 = "", now = { 0L }),
+            cache = com.ncm.app.plugin.runtime.PluginScriptCache(
+                java.nio.file.Files.createTempDirectory("vm-reg").toFile(),
+                identityDigest = "u"
+            )
+        )
+        val vm = OnlineMusicSourceViewModel(
+            manifestProvider = { sampleManifest() },
+            runtime = InMemoryPluginRuntime(emptyMap()),
+            registry = registry
+        )
+        vm.refreshManifest()
+        dispatcher.scheduler.advanceUntilIdle()
+        vm.selectSource("linglan.kw")
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals(null, vm.uiState.value.selectedPluginId)
+        assertEquals(true, vm.uiState.value.error?.contains("不可用") == true)
+    }
+
+    @Test
+    fun selectSourceSucceedsThroughRegistryWhenSigned() = runTest(dispatcher) {
+        val kp = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+        val pubB64 = java.util.Base64.getEncoder().encodeToString(kp.public.encoded)
+        val verifier = com.ncm.app.plugin.security.ManifestSignatureVerifier(trustRootB64 = pubB64, now = { 1_000_000L })
+        val script = "module.exports = { platform: 'kw', version: '1.0.0' };"
+        val hash = com.ncm.app.plugin.security.ManifestSignatureVerifier.sha256Hex(script)
+        val payload = "linglan.kw\n1.0.0\n$hash".toByteArray(Charsets.UTF_8)
+        val sig = java.util.Base64.getEncoder().encodeToString(
+            java.security.Signature.getInstance("SHA256withRSA").run { initSign(kp.private); update(payload); sign() }
+        )
+        val signedItem = com.ncm.app.plugin.manifest.ManifestItem(
+            id = "linglan.kw", name = "酷我音乐", version = "1.0.0",
+            url = "https://provider.example/kw/v1.js",
+            category = com.ncm.app.plugin.model.PluginCategory.MUSIC, protocolVersion = 1,
+            minHostVersion = null, status = com.ncm.app.plugin.model.PluginReleaseStatus.ACTIVE,
+            sha256 = hash, signature = sig, signatureTimestamp = 1_000_000L
+        )
+        val runtime = InMemoryPluginRuntime(
+            mapOf(
+                "linglan.kw" to object : com.ncm.app.plugin.provider.MusicProvider {
+                    override val pluginId: String get() = "linglan.kw"
+                    override suspend fun search(
+                        query: String,
+                        page: Int,
+                        type: String
+                    ): com.ncm.app.plugin.provider.SearchOutcome =
+                        com.ncm.app.plugin.provider.SearchOutcome(emptyList(), isEnd = true)
+                    override suspend fun resolveMedia(
+                        track: com.ncm.app.plugin.model.OnlineTrack,
+                        quality: String?
+                    ): com.ncm.app.plugin.model.ResolvedMedia = error("not used")
+                    override suspend fun lyric(
+                        track: com.ncm.app.plugin.model.OnlineTrack
+                    ): com.ncm.app.plugin.provider.LyricOutcome =
+                        com.ncm.app.plugin.provider.LyricOutcome(null, null, null, null)
+                }
+            )
+        )
+        val registry = com.ncm.app.plugin.registry.PluginRegistry(
+            runtimeFactory = { _, _, _ -> runtime },
+            downloader = { script.toByteArray() },
+            verifier = verifier,
+            cache = com.ncm.app.plugin.runtime.PluginScriptCache(
+                java.nio.file.Files.createTempDirectory("vm-reg2").toFile(),
+                identityDigest = "u"
+            )
+        )
+        val vm = OnlineMusicSourceViewModel(
+            manifestProvider = { listOf(signedItem) },
+            runtime = runtime,
+            registry = registry
+        )
+        vm.refreshManifest()
+        dispatcher.scheduler.advanceUntilIdle()
+        vm.selectSource("linglan.kw")
+        dispatcher.scheduler.advanceUntilIdle()
+        assertEquals("linglan.kw", vm.uiState.value.selectedPluginId)
+    }
 }

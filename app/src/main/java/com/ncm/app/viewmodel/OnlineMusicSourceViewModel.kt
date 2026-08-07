@@ -30,14 +30,16 @@ data class OnlineSourceUiState(
 
 /**
  * 设置页「在线音乐来源」状态机（spec §10）。
- * 阶段 2 用假清单（[sampleManifest]）与内存运行时；真实脚本下载/装载在阶段 3。
+ * selectSource 走真实装载管线：下载 → 签名门禁 → QuickJS 两步装载 → 原子激活（阶段 3/6）。
+ * 联调前置（§17）未满足时得到明确错误，绝不静默切换来源。
  */
 class OnlineMusicSourceViewModel(
     private val manifestProvider: suspend () -> List<ManifestItem>,
     private val runtime: PluginRuntime,
     private val authClient: LinglanAuthClient? = null,
     private val credentialStore: LinglanCredentialStore? = null,
-    private val settings: MusicSourceSettings? = null
+    private val settings: MusicSourceSettings? = null,
+    private val registry: com.ncm.app.plugin.registry.PluginRegistry? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(OnlineSourceUiState())
@@ -110,14 +112,38 @@ class OnlineMusicSourceViewModel(
     fun selectSource(pluginId: String) {
         if (_uiState.value.selectedPluginId == pluginId) return
         _uiState.value = _uiState.value.copy(isDownloading = true, error = null)
+        val previous = _uiState.value.selectedPluginId
         viewModelScope.launch {
-            // 阶段 3：这里触发下载+校验+装载；失败时恢复上一个当前来源（GC #13）
-            _uiState.value = _uiState.value.copy(
-                selectedPluginId = pluginId,
-                isDownloading = false
-            )
-            settings?.let { store ->
-                store.write(store.read().copy(selectedPluginId = pluginId))
+            val registry = registry
+            val item = _uiState.value.manifestItems.firstOrNull { it.id == pluginId }
+            if (registry == null || item == null) {
+                // 阶段 2 占位路径（无注册表时仅记录选择）；联调后移除
+                _uiState.value = _uiState.value.copy(
+                    selectedPluginId = pluginId,
+                    isDownloading = false
+                )
+                settings?.let { store ->
+                    store.write(store.read().copy(selectedPluginId = pluginId))
+                }
+                return@launch
+            }
+            // 真实装载管线（GC #10/#11）：下载 → 签名门禁 → QuickJS 两步装载 → 原子激活
+            registry.install(item).onSuccess { provider ->
+                _uiState.value = _uiState.value.copy(
+                    selectedPluginId = pluginId,
+                    isDownloading = false,
+                    error = null
+                )
+                settings?.let { store ->
+                    store.write(store.read().copy(selectedPluginId = pluginId))
+                }
+            }.onFailure { e ->
+                // 失败恢复上一个当前来源（GC #13），明确提示不静默切换
+                _uiState.value = _uiState.value.copy(
+                    selectedPluginId = previous,
+                    isDownloading = false,
+                    error = "来源「${item.name}」不可用：${e.message}"
+                )
             }
         }
     }

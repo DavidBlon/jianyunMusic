@@ -14,6 +14,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.ncm.app.BuildConfig
+import com.ncm.app.NeteaseApp
 import com.ncm.app.data.store.MusicSourceSettings
 import com.ncm.app.plugin.credential.KeystoreSecretVault
 import com.ncm.app.plugin.credential.LinglanCredentialStore
@@ -172,7 +173,8 @@ fun NavGraph(
                     credentialStore = LinglanCredentialStore(
                         KeystoreSecretVault(context.applicationContext, LINGLAN_AUTH_ALIAS)
                     ),
-                    settings = MusicSourceSettings(context.applicationContext)
+                    settings = MusicSourceSettings(context.applicationContext),
+                    registry = NeteaseApp.instance.pluginRegistry
                 )
             }
             MyScreen(
