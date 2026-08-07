@@ -50,7 +50,6 @@ class MusicRepository(
         private const val NETWORK_MAX_ATTEMPTS = 3
         private const val NETWORK_RETRY_DELAY_MS = 450L
         private const val OFFICIAL_SONG_URL_TIMEOUT_MS = 6_000L
-        private const val BACKUP_SONG_URL_TIMEOUT_MS = 11_500L
         private const val PLAYLIST_INITIAL_TRACK_LIMIT = 120
         private const val PLAYLIST_FULL_TRACK_LIMIT = 100000
         private const val JIANYUN_CATALOG_CACHE_MS = 60_000L
@@ -172,25 +171,20 @@ class MusicRepository(
     override suspend fun getSongDetails(ids: List<Long>): List<Song> =
         getSongDetail(ids).getOrThrow()
 
-    private var unblockManager = UnblockManager(musicSourceSettings)
-
     fun onMusicSourceKeyChanged() {
-        // Reset provider circuit-breaker state so a newly validated key becomes
-        // effective immediately even if the previous key had failed.
-        unblockManager = UnblockManager(musicSourceSettings)
+        // P6T1：聆澜/酷狗兜底链已移除，卡密变更不再需要重置熔断器
     }
 
     suspend fun getSongUrl(songId: Long, br: Int = 128000, fee: Int = 0): Result<SongUrlResponse> = safeCall {
         getJianyunSongUrlResponse(songId, br)?.let { return@safeCall it }
-        // Step 1: 先尝试从网易云官方 API 获取
+        // P6T1 后仅保留官方来源；播放失败由插件/用户重试，不再自动切换兜底音源（GC #6）
         val item = api.getSongUrl("[$songId]", br).array("data").firstOrNull()?.objOrNull()
         val rawUrl = item?.string("url")
         val playableUrl = rawUrl?.replaceFirst("http://", "https://")
         val code = item?.int("code") ?: 404
 
         if (!playableUrl.isNullOrBlank() && shouldUseOfficialMediaUrl(playableUrl)) {
-            // 官方的 URL 可用，直接返回
-            return@safeCall SongUrlResponse(
+            SongUrlResponse(
                 url = playableUrl,
                 source = "netease",
                 br = item?.int("br") ?: 0,
@@ -202,39 +196,16 @@ class MusicRepository(
                 loggedIn = session.isLoggedIn,
                 error = null
             )
-        }
-
-        cachedLinglanSongUrl(songId, br)?.let { return@safeCall it }
-
-        // Step 2: 官方不可用，尝试从本地替代音源获取
-        try {
-            // 先获取歌曲详情用于匹配
-            val songs = getSongDetail(listOf(songId)).getOrNull().orEmpty()
-            val song = songs.firstOrNull()
-            val info = UnblockManager.SongInfo(
-                id = songId,
-                name = song?.name ?: "",
-                artists = song?.artists.orEmpty(),
-                duration = song?.dt ?: 0,
-                quality = RepositoryPolicy.backupQualityFor(br)
+        } else {
+            SongUrlResponse(
+                url = null,
+                br = item?.int("br") ?: 0,
+                size = item?.long("size") ?: 0,
+                code = code,
+                loggedIn = session.isLoggedIn,
+                error = playbackUnavailableMessage(item, null, code, fee)
             )
-            val result = unblockManager.unblock(info)
-            if (result != null) {
-                return@safeCall result.toSongUrlResponse(songId)
-            }
-        } catch (_: Exception) {
-            // 替代音源不可用，忽略
         }
-
-        // Step 3: 都失败，返回原始错误
-        SongUrlResponse(
-            url = null,
-            br = item?.int("br") ?: 0,
-            size = item?.long("size") ?: 0,
-            code = code,
-            loggedIn = session.isLoggedIn,
-            error = playbackUnavailableMessage(item, null, code, fee)
-        )
     }
 
     suspend fun getSongUrlWithFallbackTimeout(songId: Long, br: Int = 128000, fee: Int = 0): Result<SongUrlResponse> = safeCall {
@@ -249,7 +220,7 @@ class MusicRepository(
         val code = item?.int("code") ?: 404
 
         if (!playableUrl.isNullOrBlank() && shouldUseOfficialMediaUrl(playableUrl)) {
-            return@safeCall SongUrlResponse(
+            SongUrlResponse(
                 url = playableUrl,
                 source = "netease",
                 br = item?.int("br") ?: 0,
@@ -261,23 +232,20 @@ class MusicRepository(
                 loggedIn = session.isLoggedIn,
                 error = null
             )
+        } else {
+            SongUrlResponse(
+                url = null,
+                br = item?.int("br") ?: 0,
+                size = item?.long("size") ?: 0,
+                code = code,
+                loggedIn = session.isLoggedIn,
+                error = playbackUnavailableMessage(item, null, code, fee)
+            )
         }
-
-        getBackupSongUrlInternal(songId, br)?.let { return@safeCall it }
-
-        SongUrlResponse(
-            url = null,
-            br = item?.int("br") ?: 0,
-            size = item?.long("size") ?: 0,
-            code = code,
-            loggedIn = session.isLoggedIn,
-            error = playbackUnavailableMessage(item, null, code, fee)
-        )
     }
 
     /**
-     * Queue preparation deliberately excludes the paid Linglan provider and its persistent cache.
-     * It resolves only through direct playable sources: NetEase, Jianyun official, and Kugou.
+     * 队列预取：仅解析直接可播来源（简云官方 + 网易云官方）；P6T1 后不再有酷狗分支。
      */
     suspend fun getSongUrlForPrefetch(
         songId: Long,
@@ -294,7 +262,7 @@ class MusicRepository(
         val code = item?.int("code") ?: 404
 
         if (!playableUrl.isNullOrBlank() && shouldUseOfficialMediaUrl(playableUrl)) {
-            return@safeCall SongUrlResponse(
+            SongUrlResponse(
                 url = playableUrl,
                 source = PlaybackSource.NETEASE,
                 br = item?.int("br") ?: 0,
@@ -306,33 +274,16 @@ class MusicRepository(
                 loggedIn = session.isLoggedIn,
                 error = null
             )
+        } else {
+            SongUrlResponse(
+                url = null,
+                br = item?.int("br") ?: 0,
+                size = item?.long("size") ?: 0,
+                code = code,
+                loggedIn = session.isLoggedIn,
+                error = playbackUnavailableMessage(item, null, code, fee)
+            )
         }
-
-        getKugouSongUrlInternal(songId, br)?.let { return@safeCall it }
-
-        SongUrlResponse(
-            url = null,
-            br = item?.int("br") ?: 0,
-            size = item?.long("size") ?: 0,
-            code = code,
-            loggedIn = session.isLoggedIn,
-            error = playbackUnavailableMessage(item, null, code, fee)
-        )
-    }
-
-    suspend fun getBackupSongUrl(
-        songId: Long,
-        br: Int = 128000,
-        excludedSources: Set<String> = emptySet()
-    ): Result<SongUrlResponse> = safeCall {
-        getJianyunSongUrlResponse(songId, br)?.let { return@safeCall it }
-        getBackupSongUrlInternal(songId, br, excludedSources) ?: SongUrlResponse(
-            url = null,
-            br = br,
-            code = 404,
-            loggedIn = session.isLoggedIn,
-            error = "聆澜及兜底音源暂时不可用"
-        )
     }
 
     private suspend fun shouldUseOfficialMediaUrl(url: String): Boolean {
@@ -366,75 +317,6 @@ class MusicRepository(
                 }
             }
         }.getOrNull()
-    }
-
-    private suspend fun getBackupSongUrlInternal(
-        songId: Long,
-        br: Int,
-        excludedSources: Set<String> = emptySet()
-    ): SongUrlResponse? {
-        if (
-            PlaybackSource.LINGLAN !in excludedSources &&
-            PlaybackSource.LINGLAN_CACHE !in excludedSources
-        ) {
-            cachedLinglanSongUrl(songId, br)?.let { return it }
-        }
-        return withTimeoutOrNull(BACKUP_SONG_URL_TIMEOUT_MS) {
-            val songs = getSongDetail(listOf(songId)).getOrNull().orEmpty()
-            val song = songs.firstOrNull()
-            val info = UnblockManager.SongInfo(
-                id = songId,
-                name = song?.name ?: "",
-                artists = song?.artists.orEmpty(),
-                duration = song?.dt ?: 0,
-                quality = RepositoryPolicy.backupQualityFor(br)
-            )
-            val result = unblockManager.unblock(info, excludedSources) ?: return@withTimeoutOrNull null
-            result.toSongUrlResponse(songId)
-        }
-    }
-
-    private suspend fun getKugouSongUrlInternal(songId: Long, br: Int): SongUrlResponse? {
-        return withTimeoutOrNull(BACKUP_SONG_URL_TIMEOUT_MS) {
-            val songs = getSongDetail(listOf(songId)).getOrNull().orEmpty()
-            val song = songs.firstOrNull()
-            val info = UnblockManager.SongInfo(
-                id = songId,
-                name = song?.name ?: "",
-                artists = song?.artists.orEmpty(),
-                duration = song?.dt ?: 0,
-                quality = RepositoryPolicy.backupQualityFor(br)
-            )
-            unblockManager.kugouOnly(info)?.toSongUrlResponse(songId)
-        }
-    }
-
-    private fun cachedLinglanSongUrl(songId: Long, br: Int): SongUrlResponse? {
-        val cached = linglanAudioCache.findReusable(songId, br) ?: return null
-        return SongUrlResponse(
-            url = cached.url,
-            source = cached.source,
-            br = cached.bitrate,
-            type = "mp3",
-            code = 200,
-            loggedIn = session.isLoggedIn,
-            error = null
-        )
-    }
-
-    private fun UnblockManager.MatchResult.toSongUrlResponse(songId: Long): SongUrlResponse {
-        if (source == PlaybackSource.LINGLAN) {
-            linglanAudioCache.rememberSource(songId, bitrate, url)
-        }
-        return SongUrlResponse(
-            url = url,
-            source = source,
-            br = bitrate,
-            type = "mp3",
-            code = 200,
-            loggedIn = session.isLoggedIn,
-            error = null
-        )
     }
 
     private suspend fun getJianyunCatalogSongs(): List<Song> = withContext(Dispatchers.IO) {

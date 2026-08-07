@@ -195,20 +195,8 @@ class PlayerViewModel : ViewModel() {
 
         override fun onPlayerError(error: PlaybackException) {
             Log.e(TAG, "playerError ${error.errorCodeName}", error)
-            val song = _state.value.currentSong
-            when {
-                song == null -> showPlaybackError(error)
-                _state.value.audioSource == PlaybackSource.NETEASE -> {
-                    switchToBackupSource(
-                        songId = song.id,
-                        requestToken = ++playRequestToken,
-                        message = "播放失败，正在尝试聆澜音源"
-                    )
-                }
-                PlaybackSource.isLinglan(_state.value.audioSource) ->
-                    evictLinglanAndSwitchToKugou(song, ++playRequestToken)
-                else -> showPlaybackError(error)
-            }
+            // P6T1：播放失败只提示，不再自动切换聆澜/酷狗兜底源（GC #6）
+            showPlaybackError(error)
         }
     }
 
@@ -700,91 +688,14 @@ class PlayerViewModel : ViewModel() {
 
     private fun scheduleBufferingFallback() {
         val song = _state.value.currentSong ?: return
-        if (_state.value.audioSource != PlaybackSource.NETEASE) return
         val requestToken = playRequestToken
         bufferingFallbackJob?.cancel()
         bufferingFallbackJob = viewModelScope.launch {
             delay(BUFFERING_FALLBACK_TIMEOUT_MS)
             if (!isCurrentSongRequest(requestToken, song.id)) return@launch
             if (player.playbackState != Player.STATE_BUFFERING) return@launch
-            switchToBackupSource(song.id, requestToken, "网易云音源加载超时，正在尝试聆澜音源")
-        }
-    }
-
-    private fun switchToBackupSource(
-        songId: Long,
-        requestToken: Long,
-        message: String,
-        excludedSources: Set<String> = emptySet()
-    ) {
-        if (!isCurrentSongRequest(requestToken, songId)) return
-        viewModelScope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = message)
-            repo.getBackupSongUrl(
-                songId = songId,
-                br = _state.value.quality.bitrate,
-                excludedSources = excludedSources
-            ).onSuccess { urlResp ->
-                if (!isCurrentSongRequest(requestToken, songId)) return@onSuccess
-                val url = urlResp.url
-                val song = _state.value.currentSong
-                if (url.isNullOrBlank() || song == null) {
-                    _state.value = _state.value.copy(
-                        isLoading = false,
-                        isPlaying = player.isPlaying,
-                        error = urlResp.error ?: "聆澜及兜底音源暂时不可用"
-                    )
-                    return@onSuccess
-                }
-                val prepared = preparedFromResponse(song, urlResp) ?: return@onSuccess
-                preparedQueueItems[songId] = prepared
-                transientBackupSongId = songId.takeIf {
-                    LinglanCachePolicy.isTransientQueueSource(prepared.source)
-                }
-                progressJob?.cancel()
-                _state.value = _state.value.copy(
-                    currentSong = prepared.song,
-                    songUrl = prepared.url,
-                    audioSource = prepared.source,
-                    duration = prepared.song.dt,
-                    isPlaying = false,
-                    isLoading = true,
-                    error = null
-                )
-                startPlayback(
-                    song = prepared.song,
-                    url = prepared.url,
-                    source = prepared.source,
-                    cacheKey = prepared.cacheKey,
-                    reuseExistingQueue = false
-                )
-            }.onFailure { e ->
-                if (!isCurrentSongRequest(requestToken, songId)) return@onFailure
-                _state.value = _state.value.copy(
-                    isLoading = false,
-                    isPlaying = player.isPlaying,
-                    error = e.message ?: "聆澜及兜底音源暂时不可用"
-                )
-            }
-        }
-    }
-
-    private fun evictLinglanAndSwitchToKugou(song: Song, requestToken: Long) {
-        viewModelScope.launch {
-            runCatching {
-                app.linglanAudioCache.remove(song.id, _state.value.quality.bitrate)
-            }
-            preparedQueueItems.remove(song.id)
-            refreshLinglanCacheStats()
-            switchToBackupSource(
-                songId = song.id,
-                requestToken = requestToken,
-                message = "聆澜音源播放失败，正在切换酷狗",
-                excludedSources = setOf(
-                    PlaybackSource.LINGLAN,
-                    PlaybackSource.LINGLAN_CACHE
-                )
-            )
+            // P6T1：缓冲超时只提示，不自动切换音源
+            _state.value = _state.value.copy(error = "缓冲超时，请检查网络后重试")
         }
     }
 
