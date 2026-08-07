@@ -35,6 +35,7 @@ import java.io.IOException
 object AppPlayer {
     private const val TAG = "AppPlayer"
     private const val MEDIA_EXTRA_SOURCE = "com.ncm.app.media.SOURCE"
+    private const val PLUGIN_KEY_PREFIX = "plugin:"
     private const val PLAYBACK_USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.0.18.203152"
 
@@ -49,6 +50,14 @@ object AppPlayer {
         val source: String
     )
 
+    /** 插件轨道快照：mediaId 为 pluginId#remoteId 复合键（非 Long）。 */
+    private data class PluginPlaybackSnapshot(
+        val track: com.ncm.app.plugin.model.OnlineTrack,
+        val shellSong: Song,
+        val url: String,
+        val source: String
+    )
+
     private var exoPlayer: ExoPlayer? = null
     private var mediaSession: MediaSession? = null
     private var linglanCacheDataSourceFactory: CacheDataSource.Factory? = null
@@ -56,6 +65,8 @@ object AppPlayer {
     private var currentSong: Song? = null
     private var currentSource: String = "netease"
     private val mediaSnapshots = mutableMapOf<Long, PlaybackSnapshot>()
+    private val pluginSnapshots = mutableMapOf<String, PluginPlaybackSnapshot>()
+    private val pluginItemHeaders = mutableMapOf<String, Map<String, String>>()
     private val rhythmAudioProcessor = RhythmAudioProcessor()
 
     /** 当前播放会话累计器（播放层单例持有，可跨 ViewModel 重建）。 */
@@ -109,8 +120,22 @@ object AppPlayer {
             .setUserAgent(PLAYBACK_USER_AGENT)
         return SelectivePlaybackDataSourceFactory(
             directFactory = httpDataSourceFactory,
-            linglanFactory = linglanCacheDataSourceFactory()
+            linglanFactory = linglanCacheDataSourceFactory(),
+            pluginFactory = { key, headers ->
+                // 插件媒体：专用无平台头的客户端，per-item 请求头作为默认请求属性
+                OkHttpDataSource.Factory(pluginPlaybackHttpClient())
+                    .setDefaultRequestProperties(headers)
+                    .createDataSource()
+            },
+            pluginHeaders = { key -> pluginItemHeaders[key.removePrefix(PLUGIN_KEY_PREFIX)] }
         )
+    }
+
+    private fun pluginPlaybackHttpClient(): OkHttpClient {
+        return OkHttpClient.Builder()
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
     }
 
     private fun linglanCacheDataSourceFactory(): CacheDataSource.Factory {
@@ -192,10 +217,17 @@ object AppPlayer {
     fun syncCurrentFromPlayer() {
         val player = exoPlayer ?: return
         val mediaItem = player.currentMediaItem ?: return
-        val mediaId = mediaItem.mediaId.toLongOrNull() ?: return
-        val snapshot = mediaSnapshots[mediaId] ?: return
-        currentSong = snapshot.song
-        currentSource = sourceFor(mediaItem) ?: snapshot.source
+        val mediaId = mediaItem.mediaId
+        mediaId.toLongOrNull()?.let { longId ->
+            val snapshot = mediaSnapshots[longId] ?: return
+            currentSong = snapshot.song
+            currentSource = sourceFor(mediaItem) ?: snapshot.source
+            return
+        }
+        // 插件轨道：mediaId 是 pluginId#remoteId 复合键
+        val plugin = pluginSnapshots[mediaId] ?: return
+        currentSong = plugin.shellSong
+        currentSource = sourceFor(mediaItem) ?: plugin.source
     }
 
     fun refreshPlaybackNotification(context: Context) {
@@ -258,6 +290,39 @@ object AppPlayer {
         currentSource = source
     }
 
+    /**
+     * 插件轨道媒体项（spec §4）：mediaId 为复合键，请求头经「plugin:」缓存键路由到
+     * 专用无网易云头的 OkHttpDataSource（Media3 1.4.1 的 RequestMetadata 不支持 per-item headers）。
+     */
+    fun pluginMediaItem(
+        track: com.ncm.app.plugin.model.OnlineTrack,
+        shellSong: Song,
+        url: String,
+        headers: Map<String, String>,
+        source: String
+    ): MediaItem {
+        val composite = track.key.asComposite()
+        pluginSnapshots[composite] = PluginPlaybackSnapshot(track, shellSong, url, source)
+        pluginItemHeaders[composite] = headers
+        val metadata = MediaMetadata.Builder()
+            .setTitle(track.title)
+            .setArtist(track.artists.joinToString("/") { it.name })
+            .setAlbumTitle(track.album?.name)
+            .setArtworkUri(track.artworkUrl?.let(Uri::parse))
+            .setExtras(Bundle().apply { putString(MEDIA_EXTRA_SOURCE, source) })
+            .build()
+        return MediaItem.Builder()
+            .setMediaId(composite)
+            .setUri(url)
+            .setCustomCacheKey("$PLUGIN_KEY_PREFIX$composite")
+            .setMediaMetadata(metadata)
+            .build()
+    }
+
+    /** 当前插件轨道（若有）；播放器侧歌词/封面能力按需降级。 */
+    fun currentPluginTrack(): com.ncm.app.plugin.model.OnlineTrack? =
+        pluginSnapshots[exoPlayer?.currentMediaItem?.mediaId]?.track
+
     /** 媒体项切换时开启新播放会话：重置累计器并生成确定性会话 id。 */
     fun beginPlaybackSession(song: Song) {
         sessionAccumulator.beginSession()
@@ -295,6 +360,8 @@ object AppPlayer {
         currentSong = null
         currentSource = "netease"
         mediaSnapshots.clear()
+        pluginSnapshots.clear()
+        pluginItemHeaders.clear()
         currentPlaybackSessionIdValue = null
         currentPlaybackSessionSongIdValue = 0L
         playbackServiceStarted = false
@@ -313,24 +380,32 @@ object AppPlayer {
     }
 
     /**
-     * Routes only MediaItems carrying a Linglan custom cache key through CacheDataSource.
-     * Official NetEase and Kugou requests always use a plain OkHttpDataSource.
+     * Routes MediaItems by cache key:
+     * - "linglan-audio:..." → Linglan CacheDataSource
+     * - "plugin:..." → 专用无平台头的 OkHttpDataSource（插件请求头）
+     * - 其他（官方网易云/酷狗）→ 普通 OkHttpDataSource
      */
     private class SelectivePlaybackDataSourceFactory(
         private val directFactory: DataSource.Factory,
-        private val linglanFactory: DataSource.Factory
+        private val linglanFactory: DataSource.Factory,
+        private val pluginFactory: (key: String, headers: Map<String, String>) -> DataSource,
+        private val pluginHeaders: (key: String) -> Map<String, String>?
     ) : DataSource.Factory {
         override fun createDataSource(): DataSource {
             return SelectivePlaybackDataSource(
                 direct = directFactory.createDataSource(),
-                linglan = linglanFactory.createDataSource()
+                linglan = linglanFactory.createDataSource(),
+                pluginFactory = pluginFactory,
+                pluginHeaders = pluginHeaders
             )
         }
     }
 
     private class SelectivePlaybackDataSource(
         private val direct: DataSource,
-        private val linglan: DataSource
+        private val linglan: DataSource,
+        private val pluginFactory: (key: String, headers: Map<String, String>) -> DataSource,
+        private val pluginHeaders: (key: String) -> Map<String, String>?
     ) : DataSource {
         private var openedSource: DataSource? = null
 
@@ -342,10 +417,15 @@ object AppPlayer {
         @Throws(IOException::class)
         override fun open(dataSpec: DataSpec): Long {
             check(openedSource == null) { "DataSource is already open" }
-            val selected = if (LinglanCachePolicy.isLinglanCacheKey(dataSpec.key)) {
-                linglan
-            } else {
-                direct
+            val key = dataSpec.key
+            val selected = when {
+                LinglanCachePolicy.isLinglanCacheKey(key) -> linglan
+                key?.startsWith(PLUGIN_KEY_PREFIX) == true -> {
+                    val headers = pluginHeaders(key)
+                        ?: throw IOException("missing plugin headers for $key")
+                    pluginFactory(key, headers)
+                }
+                else -> direct
             }
             openedSource = selected
             return selected.open(dataSpec)

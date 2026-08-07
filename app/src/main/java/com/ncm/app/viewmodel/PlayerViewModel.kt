@@ -9,6 +9,8 @@ import androidx.media3.common.Player
 import com.ncm.app.NeteaseApp
 import com.ncm.app.data.JianyunFavoriteStore
 import com.ncm.app.data.cache.LinglanCachePolicy
+import com.ncm.app.data.model.AlbumBrief
+import com.ncm.app.data.model.ArtistBrief
 import com.ncm.app.data.model.PlaybackSource
 import com.ncm.app.data.model.Song
 import com.ncm.app.data.model.SongUrlResponse
@@ -142,7 +144,13 @@ class PlayerViewModel : ViewModel() {
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            val songId = mediaItem?.mediaId?.toLongOrNull() ?: return
+            val mediaId = mediaItem?.mediaId
+            val songId = mediaId?.toLongOrNull()
+            if (songId == null) {
+                // 插件轨道：mediaId 为 pluginId#remoteId 复合键（非 Long）
+                syncPluginMediaItemState(mediaItem)
+                return
+            }
             if (_state.value.currentSong?.id == songId) return
             clearTransientBackupIfLeaving(songId)
             val prepared = preparedQueueItems[songId]
@@ -271,6 +279,55 @@ class PlayerViewModel : ViewModel() {
                 _state.value = _state.value.copy(isLoading = false, isPlaying = false, error = e.message)
             }
         }
+    }
+
+    /**
+     * 插件轨道播放（spec §4）：解析 → SSRF 校验 → 单曲入队播放。
+     * 队列/喜欢/历史等 Song 主键能力不适用于插件轨道（阶段 5 迁移主键后统一）。
+     */
+    fun playPluginTrack(track: com.ncm.app.plugin.model.OnlineTrack) {
+        playRequestJob?.cancel()
+        playRequestJob = viewModelScope.launch {
+            _state.value = _state.value.copy(isLoading = true, error = null)
+            app.playbackResolver.resolve(track, pluginQualityLabel(_state.value.quality)).onSuccess { media ->
+                val shellSong = Song(
+                    id = 0L,
+                    name = track.title,
+                    artists = track.artists.map { ArtistBrief(0L, it.name) },
+                    album = track.album?.let { AlbumBrief(0L, it.name, it.artworkUrl) },
+                    dt = track.durationMs ?: 0L
+                )
+                val source = "plugin:${track.key.pluginId}"
+                val mediaItem = AppPlayer.pluginMediaItem(track, shellSong, media.url, media.headers, source)
+                player.stop()
+                player.setMediaItems(listOf(mediaItem))
+                player.prepare()
+                player.play()
+                AppPlayer.startPlaybackService(app)
+                AppPlayer.updateCurrentPlayback(shellSong, source)
+                AppPlayer.beginPlaybackSession(shellSong)
+                AppPlayer.refreshPlaybackNotification(app)
+                _state.value = _state.value.copy(
+                    currentSong = shellSong,
+                    songUrl = media.url,
+                    audioSource = source,
+                    duration = shellSong.dt,
+                    isPlaying = true,
+                    isLoading = false,
+                    error = null
+                )
+                loadPluginLyric(track)
+            }.onFailure { e ->
+                _state.value = _state.value.copy(isLoading = false, isPlaying = false, error = e.message)
+            }
+        }
+    }
+
+    private fun pluginQualityLabel(quality: PlaybackQuality): String? = when (quality) {
+        PlaybackQuality.STANDARD -> "128k"
+        PlaybackQuality.HIGHER -> "192k"
+        PlaybackQuality.EXTREME -> "320k"
+        PlaybackQuality.LOSSLESS -> "999k"
     }
 
     fun open(songId: Long) {
@@ -966,6 +1023,38 @@ class PlayerViewModel : ViewModel() {
                 }
             }
         }
+    }
+
+    /** 插件轨道歌词：走歌曲自身绑定的插件（spec §11.3），不猜测其他来源。 */
+    private fun loadPluginLyric(track: com.ncm.app.plugin.model.OnlineTrack) {
+        viewModelScope.launch {
+            app.playbackResolver.lyric(track).onSuccess { lrc ->
+                _state.value = _state.value.copy(lyric = lrc.rawLrc, tlyric = lrc.translation)
+            }.onFailure {
+                // 插件缺歌词或请求失败 → 显示「暂无歌词」，不偷偷切换来源
+                _state.value = _state.value.copy(lyric = null, tlyric = null)
+            }
+        }
+    }
+
+    /** 插件媒体项切换：从 AppPlayer 快照恢复状态（无队列索引/喜欢/历史等 Song 主键能力）。 */
+    private fun syncPluginMediaItemState(mediaItem: MediaItem?) {
+        AppPlayer.syncCurrentFromPlayer()
+        val track = AppPlayer.currentPluginTrack() ?: return
+        val shellSong = AppPlayer.currentSong() ?: return
+        val source = AppPlayer.sourceFor(mediaItem) ?: "plugin:${track.key.pluginId}"
+        _state.value = _state.value.copy(
+            currentSong = shellSong,
+            songUrl = mediaItem?.localConfiguration?.uri?.toString(),
+            audioSource = source,
+            duration = shellSong.dt,
+            lyric = null,
+            tlyric = null,
+            isPlaying = player.isPlaying,
+            isLoading = false,
+            error = null
+        )
+        loadPluginLyric(track)
     }
 
     private fun prefetchQueueAfter(songId: Long) {

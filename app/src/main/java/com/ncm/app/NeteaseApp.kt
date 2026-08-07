@@ -19,6 +19,15 @@ import com.ncm.app.data.weekly.WeeklyPlayLog
 import com.ncm.app.data.weekly.WeeklyRecommendationStore
 import com.ncm.app.data.weekly.WeeklyDatabase
 import com.ncm.app.domain.weekly.GenerateWeeklyRecommendationUseCase
+import com.ncm.app.plugin.PlaybackResolver
+import com.ncm.app.plugin.PluginSearchService
+import com.ncm.app.plugin.runtime.ControlledHttpBridge
+import com.ncm.app.plugin.runtime.HttpExecutor
+import com.ncm.app.plugin.runtime.HttpRequestSpec
+import com.ncm.app.plugin.runtime.HttpResult
+import com.ncm.app.plugin.runtime.InMemoryPluginRuntime
+import com.ncm.app.plugin.runtime.PluginRuntime
+import com.ncm.app.plugin.security.SsrfGuard
 import com.ncm.app.ui.theme.AccentThemeSettings
 import com.ncm.app.ui.theme.PlayerAppearanceSettings
 import kotlinx.coroutines.CoroutineScope
@@ -26,6 +35,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
@@ -65,6 +76,18 @@ class NeteaseApp : Application(), ImageLoaderFactory {
     lateinit var generateWeeklyRecommendationUseCase: GenerateWeeklyRecommendationUseCase
         private set
     lateinit var weeklyCacheCleaner: WeeklyCacheCleaner
+        private set
+
+    // ---- 插件宿主（阶段 4 组装；阶段 6 由 PluginRegistry + QuickJsPluginRuntime 驱动）----
+    lateinit var onlineSourceSettings: com.ncm.app.data.store.MusicSourceSettings
+        private set
+    lateinit var pluginRuntime: PluginRuntime
+        private set
+    lateinit var playbackResolver: PlaybackResolver
+        private set
+    lateinit var pluginSearchService: PluginSearchService
+        private set
+    lateinit var pluginHttpBridge: ControlledHttpBridge
         private set
 
     override fun onCreate() {
@@ -133,7 +156,46 @@ class NeteaseApp : Application(), ImageLoaderFactory {
             .build()
 
         api = retrofit.create(NeteaseApi::class.java)
-        repository = MusicRepository(api, session, linglanAudioCache, musicSourceSettings)
+        initPluginHost()
+    }
+
+    /**
+     * 插件宿主组装（阶段 4）：受控 HTTP 桥（SSRF 前置校验；DNS 重绑定防护在阶段 6 的
+     * 自定义 DNS 层补全）+ 播放解析器 + 搜索服务。当前运行时为内存占位，
+     * 真实脚本的下载/校验/装载由 PluginRegistry 驱动（阶段 6 接线到设置页选择来源）。
+     */
+    private fun initPluginHost() {
+        onlineSourceSettings = com.ncm.app.data.store.MusicSourceSettings(this)
+
+        val pluginHttp = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .followRedirects(false)
+            .build()
+        val pluginHttpExecutor: HttpExecutor = { spec ->
+            val request = Request.Builder()
+                .url(spec.url)
+                .method(spec.method, spec.body?.let { RequestBody.create(null, it) })
+                .apply { spec.headers.forEach { (k, v) -> header(k, v) } }
+                .build()
+            pluginHttp.newCall(request).execute().use { response ->
+                HttpResult(
+                    status = response.code,
+                    headers = response.headers.toMultimap().mapValues { it.value.firstOrNull() ?: "" },
+                    data = response.body?.bytes() ?: byteArrayOf()
+                )
+            }
+        }
+        pluginHttpBridge = ControlledHttpBridge(
+            ssrfGuard = SsrfGuard(),
+            executor = pluginHttpExecutor
+        )
+
+        pluginRuntime = InMemoryPluginRuntime(emptyMap())
+        playbackResolver = PlaybackResolver(pluginRuntime, SsrfGuard())
+        pluginSearchService = PluginSearchService(pluginRuntime) { onlineSourceSettings.currentPluginId }
+        repository = MusicRepository(api, session, linglanAudioCache, musicSourceSettings, pluginSearchService)
     }
 
     private fun initWeeklyRecommendation() {
