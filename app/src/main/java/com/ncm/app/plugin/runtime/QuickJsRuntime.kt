@@ -338,6 +338,11 @@ class QuickJsRuntime(
               }
               return __awaitState === undefined ? 'none' : __awaitState;
             }
+
+            /* ---- 导出方法存在性探针（过渡模式第二步装载检查） ---- */
+            function hasExport(name) {
+              return module.exports[name] !== undefined;
+            }
         """
     }
 }

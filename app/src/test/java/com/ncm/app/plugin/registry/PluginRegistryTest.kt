@@ -113,4 +113,38 @@ class PluginRegistryTest {
         val result = registry.install(item())
         assertTrue(result.isFailure)
     }
+
+    @Test
+    fun transitionModeInstallsUnsignedScriptWhenShaMatches() = runTest {
+        // 过渡模式（requireSignedManifest=false，2026-08 聆澜联调前）：无签名脚本仅校验可选 SHA-256
+        val script = "module.exports = { platform: 'kw', version: '1.0.0' };"
+        val hash = ManifestSignatureVerifier.sha256Hex(script)
+        val provider = FakeProvider("linglan.kw")
+        val runtime = InMemoryPluginRuntime(mapOf("linglan.kw" to provider))
+        val registry = PluginRegistry(
+            runtimeFactory = { _, _, _ -> runtime },
+            downloader = { script.toByteArray() },
+            verifier = ManifestSignatureVerifier(trustRootB64 = "", now = { 0L }),
+            cache = cache(),
+            requireSignedManifest = false
+        )
+        val result = registry.install(item(id = "linglan.kw", sha256 = hash))
+        assertTrue(result.isSuccess)
+        assertTrue(registry.currentProvider("linglan.kw") != null)
+    }
+
+    @Test
+    fun transitionModeRejectsTamperedScriptWhenShaProvided() = runTest {
+        val script = "module.exports = { platform: 'kw', version: '1.0.0' };"
+        val hash = ManifestSignatureVerifier.sha256Hex(script)
+        val registry = PluginRegistry(
+            runtimeFactory = { _, _, _ -> throw UnsupportedOperationException("不应到达") },
+            downloader = { (script + "\n// tampered").toByteArray() },
+            verifier = ManifestSignatureVerifier(trustRootB64 = "", now = { 0L }),
+            cache = cache(),
+            requireSignedManifest = false
+        )
+        val result = registry.install(item(id = "linglan.kw", sha256 = hash))
+        assertTrue(result.isFailure)
+    }
 }

@@ -19,7 +19,7 @@ import com.ncm.app.data.store.MusicSourceSettings
 import com.ncm.app.plugin.credential.KeystoreSecretVault
 import com.ncm.app.plugin.credential.LinglanCredentialStore
 import com.ncm.app.plugin.manifest.LinglanAuthClient
-import com.ncm.app.plugin.runtime.InMemoryPluginRuntime
+import com.ncm.app.plugin.manifest.LinglanManifestClient
 import com.ncm.app.ui.screens.discover.DiscoverScreen
 import com.ncm.app.ui.screens.artist.ArtistDetailScreen
 import com.ncm.app.ui.screens.legal.DisclaimerScreen
@@ -151,9 +151,9 @@ fun NavGraph(
             val okHttpClient = remember { okhttp3.OkHttpClient() }
             val onlineSourceViewModel: OnlineMusicSourceViewModel = viewModel {
                 OnlineMusicSourceViewModel(
-                    // 阶段 2 用假清单；阶段 3 由 LinglanManifestClient 替换
+                    // 阶段 2 占位清单提供者；manifestClient 注入后 connect 成功即走真实清单
                     manifestProvider = { sampleManifest() },
-                    runtime = InMemoryPluginRuntime(emptyMap()),
+                    runtime = NeteaseApp.instance.pluginRuntime,
                     authClient = LinglanAuthClient(
                         endpoint = BuildConfig.PAID_MUSIC_API_URL
                             .removeSuffix("/music")
@@ -174,7 +174,23 @@ fun NavGraph(
                         KeystoreSecretVault(context.applicationContext, LINGLAN_AUTH_ALIAS)
                     ),
                     settings = MusicSourceSettings(context.applicationContext),
-                    registry = NeteaseApp.instance.pluginRegistry
+                    registry = NeteaseApp.instance.pluginRegistry,
+                    manifestClient = LinglanManifestClient(
+                        endpointTemplate = BuildConfig.PAID_MUSIC_API_URL
+                            .removeSuffix("/music")
+                            .takeIf { it.startsWith("https://") }
+                            ?.let { "$it/script/mf.json?key=" }
+                            ?: LinglanManifestClient.DEFAULT_ENDPOINT_TEMPLATE,
+                        http = { url ->
+                            // 清单 URL 含密钥查询参数（聆澜现状，spec §8.3 过渡）：仅内存使用，
+                            // 不持久化；响应体不落日志
+                            val request = okhttp3.Request.Builder()
+                                .url(url)
+                                .header("User-Agent", "JianYunMusic/${BuildConfig.VERSION_NAME}")
+                                .build()
+                            okHttpClient.newCall(request).execute().use { it.body?.string() ?: "" }
+                        }
+                    )
                 )
             }
             MyScreen(

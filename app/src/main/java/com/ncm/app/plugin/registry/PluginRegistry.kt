@@ -15,7 +15,8 @@ class PluginRegistry(
     private val downloader: suspend (String) -> ByteArray,
     private val verifier: ManifestSignatureVerifier,
     private val cache: PluginScriptCache,
-    private val hostParams: Map<String, Any?> = emptyMap()
+    private val hostParams: Map<String, Any?> = emptyMap(),
+    private val requireSignedManifest: Boolean = true
 ) {
     private val runtimes = mutableMapOf<String, PluginRuntime>()
 
@@ -31,10 +32,22 @@ class PluginRegistry(
         if (bytes.size > MAX_SCRIPT_BYTES) return Result.failure(IllegalStateException("script too large"))
         val script = String(bytes, Charsets.UTF_8)
 
-        // 生产签名硬门槛（GC #10）：缺签名或签名无效 → 拒绝
-        val signature = item.signature ?: return Result.failure(IllegalStateException("manifest missing signature"))
-        val decision = verifier.verify(item, script, signature, item.signatureTimestamp ?: 0L)
-        if (decision is VerifyDecision.Invalid) return Result.failure(IllegalStateException(decision.reason))
+        // 生产签名硬门槛（GC #10）：缺签名或签名无效 → 拒绝。
+        // 过渡模式（requireSignedManifest=false）：聆澜清单尚无签名（已探测确认），
+        // 降级为「HTTPS 来源 + 大小上限 + 可选 SHA-256」；联调提供签名后恢复门禁。
+        val signature = item.signature
+        if (requireSignedManifest) {
+            if (signature == null) return Result.failure(IllegalStateException("manifest missing signature"))
+            val decision = verifier.verify(item, script, signature, item.signatureTimestamp ?: 0L)
+            if (decision is VerifyDecision.Invalid) return Result.failure(IllegalStateException(decision.reason))
+        } else {
+            // 仅当清单提供 sha256 时校验脚本摘要（防传输篡改）；缺失则退化为 HTTPS 信任
+            item.sha256?.let { expected ->
+                if (!ManifestSignatureVerifier.sha256Hex(script).equals(expected, ignoreCase = true)) {
+                    return Result.failure(IllegalStateException("script hash mismatch"))
+                }
+            }
+        }
 
         // 候选缓存 → 新上下文两步装载（GC #11，P3T8 的 load 内部做两段检查）→ 原子激活
         cache.stageCandidate(item.id, item.version, script)

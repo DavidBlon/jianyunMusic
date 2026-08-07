@@ -9,6 +9,7 @@ import com.ncm.app.plugin.credential.LinglanCredentialStore
 import com.ncm.app.plugin.manifest.AuthValidationResult
 import com.ncm.app.plugin.manifest.DEFAULT_SOURCE_ALLOW_RULES
 import com.ncm.app.plugin.manifest.LinglanAuthClient
+import com.ncm.app.plugin.manifest.LinglanManifestClient
 import com.ncm.app.plugin.manifest.ManifestItem
 import com.ncm.app.plugin.manifest.allowedManifestItems
 import com.ncm.app.plugin.model.PluginCategory
@@ -39,7 +40,8 @@ class OnlineMusicSourceViewModel(
     private val authClient: LinglanAuthClient? = null,
     private val credentialStore: LinglanCredentialStore? = null,
     private val settings: MusicSourceSettings? = null,
-    private val registry: com.ncm.app.plugin.registry.PluginRegistry? = null
+    private val registry: com.ncm.app.plugin.registry.PluginRegistry? = null,
+    private val manifestClient: LinglanManifestClient? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(OnlineSourceUiState())
@@ -101,7 +103,18 @@ class OnlineMusicSourceViewModel(
 
     fun refreshManifest() {
         viewModelScope.launch {
-            val items = runCatchingManifest()
+            // 真实清单客户端存在时用 Keystore 里的密钥拉取（密钥仅内存拼接 URL，不进日志）；
+            // 否则回落到注入的清单提供者（假清单/测试）。
+            val secret = credentialStore?.read()
+            val items = if (secret != null && manifestClient != null) {
+                try {
+                    manifestClient.fetch(secret)
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            } else {
+                runCatchingManifest()
+            }
             _uiState.value = _uiState.value.copy(
                 manifestItems = allowedManifestItems(items, DEFAULT_SOURCE_ALLOW_RULES),
                 error = null

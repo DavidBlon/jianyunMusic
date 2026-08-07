@@ -2,6 +2,7 @@ package com.ncm.app.plugin.manifest
 
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LinglanManifestClientTest {
@@ -22,7 +23,7 @@ class LinglanManifestClientTest {
     @Test
     fun parsesManifestIntoDescriptors() = runTest {
         val client = LinglanManifestClient(http = { sampleJson })
-        val items = client.fetch()
+        val items = client.fetch("test-key")
         assertEquals(2, items.size)
         assertEquals("linglan.kw", items[0].id)
         assertEquals("https://provider.example/kw.js", items[0].url)
@@ -32,14 +33,48 @@ class LinglanManifestClientTest {
     @Test
     fun malformedJsonYieldsEmptyListNotCrash() = runTest {
         val client = LinglanManifestClient(http = { "not-json" })
-        assertEquals(emptyList<ManifestItem>(), client.fetch())
+        assertEquals(emptyList<ManifestItem>(), client.fetch("test-key"))
     }
 
     @Test
     fun missingStableIdDropsItem() = runTest {
         val client = LinglanManifestClient(http = {
-            """{"plugins":[{"name":"无ID","version":"1.0","url":"https://provider.example/kw.js","category":"music"}]}"""
+            """{"plugins":[{"name":"无ID","version":"1.0","url":"https://provider.example/other.js","category":"music"}]}"""
         })
-        assertEquals(emptyList<ManifestItem>(), client.fetch())
+        assertEquals(emptyList<ManifestItem>(), client.fetch("test-key"))
+    }
+
+    @Test
+    fun realLinglanManifestStructureParsesWithUrlInferredIds() = runTest {
+        // 聆澜 mf.json 真实结构（已探测）：无 id/category 字段，脚本 URL 带密钥查询参数
+        val realJson = """
+            {"plugins":[
+              {"name":"酷狗音乐","url":"https://source.shiqianjiang.cn/script/mf/kg.js?key=SECRET.json","version":"7"},
+              {"name":"酷我音乐","url":"https://source.shiqianjiang.cn/script/mf/kw.js?key=SECRET.json","version":"7"},
+              {"name":"QQ音乐","url":"https://source.shiqianjiang.cn/script/mf/tx.js?key=SECRET.json","version":"7"},
+              {"name":"网易云音乐","url":"https://source.shiqianjiang.cn/script/mf/wy.js?key=SECRET.json","version":"7"},
+              {"name":"bilibili","url":"https://source.shiqianjiang.cn/script/mf/bilibili.js?key=SECRET.json","version":"4.0.0"},
+              {"name":"GitCode","url":"https://source.shiqianjiang.cn/script/mf/git.js?key=SECRET.json","version":"4.0.0"}
+            ]}
+        """.trimIndent()
+        val client = LinglanManifestClient(http = { realJson })
+        val items = client.fetch("test-key")
+        assertEquals(4, items.size)
+        assertEquals("linglan.kg", items.first { it.name == "酷狗音乐" }.id)
+        assertEquals("linglan.kw", items.first { it.name == "酷我音乐" }.id)
+        assertEquals("linglan.tx", items.first { it.name == "QQ音乐" }.id)
+        assertEquals("linglan.wy", items.first { it.name == "网易云音乐" }.id)
+        assertTrue(items.none { it.name == "bilibili" || it.name == "GitCode" })
+    }
+
+    @Test
+    fun endpointTemplateAppendsSecretToUrl() = runTest {
+        var requestedUrl: String? = null
+        val client = LinglanManifestClient(
+            endpointTemplate = "https://example.test/mf.json?key=",
+            http = { url -> requestedUrl = url; "{\"plugins\":[]}" }
+        )
+        client.fetch("CERU_KEY-abc")
+        assertEquals("https://example.test/mf.json?key=CERU_KEY-abc", requestedUrl)
     }
 }

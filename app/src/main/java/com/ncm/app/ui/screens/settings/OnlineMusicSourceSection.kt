@@ -106,6 +106,14 @@ fun OnlineMusicSourceSection(viewModel: OnlineMusicSourceViewModel) {
                         modifier = Modifier.padding(vertical = 8.dp)
                     )
                 }
+                state.error?.let { message ->
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
+                    )
+                }
                 state.manifestItems.forEach { item ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,

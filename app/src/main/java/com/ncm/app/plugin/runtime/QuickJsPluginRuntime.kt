@@ -11,15 +11,18 @@ import com.ncm.app.plugin.provider.SearchOutcome
 /**
  * 单个插件的 QuickJS 运行时（GC #7 每插件独立上下文）。可直接作为 P3T7 的 runtimeFactory。
  *
- * 注：契约探针（GC #11 第二步）在禁用真实网络的环境下调用插件 search；
- * 真实脚本联调（阶段 4）前需与聆澜确认探针策略（§17）。
+ * 两步装载（过渡模式，2026-08 联调前）：
+ * 第一步：禁用真实网络的上下文求值脚本并解析元数据（loadModule）。
+ * 第二步：导出方法存在性探针（search/getMediaSource/getLyric 必须存在）。
+ * 真实脚本的 search 必须联网，无法在禁用网络的探针里调用（§7.3 的固定响应探针
+ * 仅适用于假插件契约测试）；装载后 [httpExecutor] 替换为受控 HTTP 桥供真实调用。
  */
 class QuickJsPluginRuntime(
     private val pluginId: String,
     private val script: String,
     private val hostParams: Map<String, Any?> = emptyMap(),
     private val callTimeoutMs: Long = DEFAULT_CALL_TIMEOUT_MS,
-    private val probeTimeoutMs: Long = PROBE_TIMEOUT_MS
+    private val httpExecutor: HttpExecutor? = null
 ) : PluginRuntime {
 
     private val engine = QuickJsRuntime(callTimeoutMs = callTimeoutMs)
@@ -35,18 +38,17 @@ class QuickJsPluginRuntime(
     }
 
     init {
-        // GC #11 两步装载：
-        // 第一步：禁用真实网络的上下文求值脚本并解析元数据（P3T1.loadModule）。
-        engine.loadModule(pluginId, script, hostParams)
-        // 探针期间把受控 HTTP 桥固定为 probeExecutor（只应答 probe 域名，不访问真实网络）。
-        engine.useHttpExecutor(probeExecutor)
-        // 第二步：宿主固定 HTTP 响应执行契约探针（P3T4）；未通过则抛错，registry 不激活候选。
-        val probe = runContractProbe(pluginId) {
-            engine.invokeMethod(pluginId, "search", arrayOf("__probe__", 1, "music"))
+        // GC #11 第一步：禁用真实网络的上下文求值脚本并解析元数据。
+        val meta = engine.loadModule(pluginId, script, hostParams)
+        // 第二步：导出方法存在性探针（真实脚本的 search 需联网，不能在探针中调用）。
+        val missing = REQUIRED_EXPORTS.filter { name ->
+            engine.invokeMethod(pluginId, "hasExport", arrayOf(name)) != true
         }
-        if (!probe.healthy) {
-            throw PluginException("PROBE_FAILED", "契约探针未通过：${probe.reason}", retryable = false)
+        if (missing.isNotEmpty() || meta.platform.isBlank()) {
+            throw PluginException("PROBE_FAILED", "契约探针未通过：缺少导出 ${missing.joinToString()}", retryable = false)
         }
+        // 真实调用阶段：受控 HTTP 桥（SSRF 前置校验由 NeteaseApp 组装），缺省回落探针执行器
+        engine.useHttpExecutor(httpExecutor ?: probeExecutor)
     }
 
     override fun providerFor(id: String): MusicProvider? {
@@ -103,6 +105,6 @@ class QuickJsPluginRuntime(
 
     private companion object {
         const val DEFAULT_CALL_TIMEOUT_MS = 10_000L
-        const val PROBE_TIMEOUT_MS = 2_000L
+        val REQUIRED_EXPORTS = listOf("search", "getMediaSource", "getLyric")
     }
 }

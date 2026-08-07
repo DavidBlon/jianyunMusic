@@ -21,13 +21,15 @@ data class SourceAllowRule(
 /** 允许的来源类型集合：仅酷狗/酷我/QQ/网易云（GC #9）。 */
 val ALLOWED_SOURCE_TYPES: Set<String> = setOf("kw", "kugou", "kg", "tx", "qq", "wy")
 
-/** 临时允许列表：预置主机 + 路径 + 精确来源类型；不含 Bilibili/GitCode（GC #9）。 */
+/**
+ * 临时允许列表：预置主机 + 路径 + 精确来源类型；不含 Bilibili/GitCode（GC #9）。
+ * 聆澜真实清单路径为 /api/script/mf/{kg,kw,tx,wy}.js（已探测确认）。
+ */
 val DEFAULT_SOURCE_ALLOW_RULES: List<SourceAllowRule> = listOf(
-    SourceAllowRule("provider.example", "/kw", "kw"),
-    SourceAllowRule("provider.example", "/kugou", "kugou"),
-    SourceAllowRule("provider.example", "/tx", "tx"),
-    SourceAllowRule("provider.example", "/qq", "qq"),
-    SourceAllowRule("provider.example", "/wy", "wy")
+    SourceAllowRule("source.shiqianjiang.cn", "/script/mf/kg.js", "kg"),
+    SourceAllowRule("source.shiqianjiang.cn", "/script/mf/kw.js", "kw"),
+    SourceAllowRule("source.shiqianjiang.cn", "/script/mf/tx.js", "tx"),
+    SourceAllowRule("source.shiqianjiang.cn", "/script/mf/wy.js", "wy")
 )
 
 /**
@@ -56,11 +58,13 @@ fun sourceTypeOf(item: ManifestItem, rules: List<SourceAllowRule>): String? {
 }
 
 /** 清单无稳定 id 时，按 GC #5 版本化精确映射生成；无法命中返回 null。 */
-fun inferStablePluginId(item: ManifestItem): String? = when {
-    item.id.isNotBlank() -> item.id
-    item.url.contains("/kw") -> "linglan.kw"
-    item.url.contains("/kugou") || item.url.contains("/kg") -> "linglan.kg"
-    item.url.contains("/tx") -> "linglan.tx"
-    item.url.contains("/wy") -> "linglan.wy"
+fun inferStablePluginId(item: ManifestItem): String? = inferStablePluginIdFromUrl(item.url)
+
+/** 按 GC #5 版本化精确映射从脚本 URL 推断稳定 ID（聆澜真实路径 /script/mf/{kg,kw,tx,wy}.js）。 */
+fun inferStablePluginIdFromUrl(url: String): String? = when {
+    url.contains("/kg") -> "linglan.kg"
+    url.contains("/kw") -> "linglan.kw"
+    url.contains("/tx") -> "linglan.tx"
+    url.contains("/wy") -> "linglan.wy"
     else -> null
 }

@@ -18,16 +18,24 @@ data class ManifestItem(
     val signatureTimestamp: Long? = null      // 签名时间（毫秒），防重放（GC #10）
 )
 
-/** 拉取聆澜插件清单。HTTP 通过构造注入，生产用 OkHttp（P2T5），单测用固定响应。 */
+/**
+ * 拉取聆澜插件清单（真实端点：{apiRoot}/script/mf.json?key={密钥}）。
+ *
+ * 密钥只存在于构造 URL 的内存中：不持久化、不写入日志/崩溃报告/分析事件（GC #4/#15）。
+ * 清单当前无稳定 id 字段（已探测确认），按 GC #5 内置 URL 路径映射推断稳定 ID
+ * （/mf/kg.js → linglan.kg 等）；推断不出（如 bilibili/git.js）的条目被丢弃。
+ */
 class LinglanManifestClient(
-    private val http: suspend (String) -> String
+    private val http: suspend (String) -> String,
+    private val endpointTemplate: String = DEFAULT_ENDPOINT_TEMPLATE
 ) {
     /**
      * 解析清单 JSON。畸形响应按空表处理是契约要求（「清单不可用按空处理」），
      * 不是隐藏错误，调用方据此展示重试入口。
      */
-    suspend fun fetch(): List<ManifestItem> = try {
-        val root = JsonParser.parseString(http(ENDPOINT)).asJsonObject
+    suspend fun fetch(secret: String): List<ManifestItem> = try {
+        val url = endpointTemplate + secret
+        val root = JsonParser.parseString(http(url)).asJsonObject
         val plugins = root.getAsJsonArray("plugins") ?: return emptyList()
         plugins.mapNotNull { element ->
             val item = element.asJsonObject
@@ -35,16 +43,16 @@ class LinglanManifestClient(
             val status = PluginReleaseStatus.entries
                 .firstOrNull { it.name.equals(statusText, ignoreCase = true) }
                 ?: return@mapNotNull null
+            val url = item.get("url")?.asString?.trim() ?: return@mapNotNull null
             ManifestItem(
-                id = item.get("id")?.asString?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null,
+                id = item.get("id")?.asString?.trim()?.takeIf { it.isNotBlank() }
+                    ?: inferStablePluginIdFromUrl(url)
+                    ?: return@mapNotNull null,
                 name = item.get("name")?.asString ?: "",
                 version = item.get("version")?.asString ?: "",
-                url = item.get("url")?.asString ?: "",
-                category = if ((item.get("category")?.asString ?: "") == "music") {
-                    PluginCategory.MUSIC
-                } else {
-                    PluginCategory.OTHER
-                },
+                url = url,
+                // 聆澜 mf.json 无 category 字段：按 MUSIC 处理，来源过滤由 allowlist 把关（GC #9）
+                category = PluginCategory.MUSIC,
                 protocolVersion = item.get("protocolVersion")?.asInt ?: 1,
                 minHostVersion = item.get("minHostVersion")?.asString,
                 status = status,
@@ -57,7 +65,8 @@ class LinglanManifestClient(
         emptyList()
     }
 
-    private companion object {
-        const val ENDPOINT = "https://linglan.invalid/manifest"  // 生产替换，见 P2T5
+    companion object {
+        /** 生产端点模板：密钥由调用方拼接（仅内存使用）；可经构造注入覆盖。 */
+        const val DEFAULT_ENDPOINT_TEMPLATE = "https://source.shiqianjiang.cn/api/script/mf.json?key="
     }
 }

@@ -174,7 +174,8 @@ class NeteaseApp : Application(), ImageLoaderFactory {
         )
         pluginRegistry = PluginRegistry(
             runtimeFactory = { pluginId, script, hostParams ->
-                QuickJsPluginRuntime(pluginId, script, hostParams)
+                // 真实调用阶段使用受控 HTTP 桥（SSRF 前置校验），插件 axios 请求走桥
+                QuickJsPluginRuntime(pluginId, script, hostParams, httpExecutor = pluginHttpExecutor)
             },
             downloader = { url ->
                 val request = Request.Builder().url(url).get().build()
@@ -186,7 +187,10 @@ class NeteaseApp : Application(), ImageLoaderFactory {
                 }
             },
             verifier = ManifestSignatureVerifier(trustRootB64 = "", now = { System.currentTimeMillis() }),
-            cache = scriptCache
+            cache = scriptCache,
+            // 过渡模式（2026-08 确认）：聆澜脚本暂无签名，仅 HTTPS + 大小 + 可选 SHA-256 校验；
+            // 聆澜提供签名后改回 requireSignedManifest = true（生产门禁，§9）
+            requireSignedManifest = false
         )
 
         pluginRuntime = RegistryPluginRuntime(pluginRegistry)
