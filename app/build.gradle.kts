@@ -190,6 +190,9 @@ dependencies {
     // QR code generation
     implementation("com.google.zxing:core:3.5.3")
 
+    // QuickJS plugin runtime (阶段 3 插件宿主；Apache-2.0，JNI，Promise/ESModule/16KB page)
+    implementation("wang.harlon.quickjs:wrapper-android:3.2.3")
+
     // Debug
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
