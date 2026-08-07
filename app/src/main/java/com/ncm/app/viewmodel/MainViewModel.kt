@@ -1,7 +1,6 @@
 package com.ncm.app.viewmodel
 
 import android.util.Log
-import android.webkit.CookieManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ncm.app.NeteaseApp
@@ -11,7 +10,6 @@ import com.ncm.app.data.model.*
 import com.ncm.app.data.repository.JianyunOfficialContent
 import com.ncm.app.data.repository.MusicSourceKeyValidationResult
 import com.ncm.app.data.weekly.WeeklyCacheCleaner
-import com.ncm.app.data.weekly.WeeklyLogoutCoordinator
 import com.ncm.app.domain.weekly.GenerationKey
 import com.ncm.app.domain.weekly.GenerateWeeklyRecommendationUseCase
 import com.ncm.app.domain.weekly.WEEKLY_PLAYLIST_ID
@@ -20,22 +18,23 @@ import com.ncm.app.domain.weekly.WeeklyRecUiMapper
 import com.ncm.app.domain.weekly.WeeklyRecUiState
 import com.ncm.app.domain.weekly.canReuseWeeklyRecommendation
 import com.ncm.app.domain.weekly.restoreWeeklyRecommendationOrder
+import com.ncm.app.plugin.model.OnlineTrack
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.temporal.TemporalAdjusters
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
+/** 本地首页（P6T3）：只展示本地最近播放、收藏和简云官方内容，不再有网易云推荐（spec §18）。 */
 data class DiscoverUiState(
-    val banners: List<BannerItem> = emptyList(),
-    val playlists: List<PinnedPlaylist> = emptyList(),
-    val dailySongs: List<Song> = emptyList(),
-    val newSongs: List<Song> = emptyList(),
+    val officialSongs: List<Song> = emptyList(),
+    val recentSongs: List<Song> = emptyList(),
+    val likedCount: Int = 0,
     val isLoading: Boolean = false,
     val error: String? = null
 )
@@ -58,7 +57,9 @@ data class ArtistDetailUiState(
 
 data class SearchUiState(
     val query: String = "",
-    val results: List<Song> = emptyList(),
+    val results: List<Song> = emptyList(),                 // 本地（简云官方）
+    val pluginResults: List<OnlineTrack> = emptyList(),    // 当前来源插件结果（单来源，GC #6）
+    val pluginSourceLabel: String? = null,
     val isSearching: Boolean = false,
     val isCommitted: Boolean = false,
     val history: List<String> = emptyList(),
@@ -67,27 +68,8 @@ data class SearchUiState(
 
 data class MyUiState(
     val profile: UserProfile? = null,
-    val playlists: List<Playlist> = emptyList(),
-    val isLoading: Boolean = true,
     val likedCount: Int = 0,
-    val listenCount: Int = 0,
-    val followCount: Int = 0
-)
-
-data class QuickListUiState(
-    val title: String = "",
-    val entries: List<QuickEntry> = emptyList(),
-    val isLoading: Boolean = false,
-    val error: String? = null,
-    val loadedType: String = ""
-)
-
-data class LoginUiState(
-    val qrImg: String? = null,
-    val qrKey: String? = null,
-    val qrCode: Int = 0,
-    val isLoggingIn: Boolean = false,
-    val error: String? = null
+    val isLoading: Boolean = true
 )
 
 data class AppUiState(val isLoggedIn: Boolean = false)
@@ -100,6 +82,7 @@ class MainViewModel : ViewModel() {
     private val jianyunFavorites = JianyunFavoriteStore(cache) { session.userId }
     private val musicSourceSettings = NeteaseApp.instance.musicSourceSettings
     private val musicSourceKeyValidator = NeteaseApp.instance.musicSourceKeyValidator
+    private val onlineSourceSettings = NeteaseApp.instance.onlineSourceSettings
 
     private val _discoverState = MutableStateFlow(DiscoverUiState())
     val discoverState: StateFlow<DiscoverUiState> = _discoverState
@@ -118,7 +101,7 @@ class MainViewModel : ViewModel() {
     )
     val searchState: StateFlow<SearchUiState> = _searchState
 
-    private val _myState = MutableStateFlow(if (session.isLoggedIn) MyUiState() else MyUiState(isLoading = false))
+    private val _myState = MutableStateFlow(MyUiState(isLoading = false))
     val myState: StateFlow<MyUiState> = _myState
 
     private val _weeklyRecState = MutableStateFlow<WeeklyRecUiState>(WeeklyRecUiState.Loading)
@@ -136,39 +119,16 @@ class MainViewModel : ViewModel() {
     private var weeklyDetailSongsKey: GenerationKey? = null
     private var weeklyDetailLoadingKey: GenerationKey? = null
 
-    private val _logoutCleanupWarning = MutableStateFlow<String?>(null)
-    val logoutCleanupWarning: StateFlow<String?> = _logoutCleanupWarning
+    private val _appState = MutableStateFlow(AppUiState(isLoggedIn = false))
+    val appState: StateFlow<AppUiState> = _appState
 
     private val generateWeeklyRecommendationUseCase: GenerateWeeklyRecommendationUseCase
         get() = NeteaseApp.instance.generateWeeklyRecommendationUseCase
     private val weeklyCacheCleaner: WeeklyCacheCleaner
         get() = NeteaseApp.instance.weeklyCacheCleaner
 
-    private val logoutCoordinator by lazy {
-        WeeklyLogoutCoordinator(
-            invalidateSession = { session.invalidate() },
-            cancelInFlight = { generateWeeklyRecommendationUseCase.cancelGenerationForUser(session.userId) },
-            cleaner = weeklyCacheCleaner
-        )
-    }
-
-    fun consumeLogoutCleanupWarning() {
-        _logoutCleanupWarning.value = null
-    }
-
-    private val _quickListState = MutableStateFlow(QuickListUiState())
-    val quickListState: StateFlow<QuickListUiState> = _quickListState
-
-    private val _loginState = MutableStateFlow(LoginUiState())
-    val loginState: StateFlow<LoginUiState> = _loginState
-
-    private val _appState = MutableStateFlow(AppUiState(isLoggedIn = session.isLoggedIn))
-    val appState: StateFlow<AppUiState> = _appState
-    private var qrPollingJob: Job? = null
-
     private val playlistCache = mutableMapOf<Long, PlaylistDetailUiState>()
     private val artistDetailCache = mutableMapOf<Long, ArtistDetail>()
-    private val quickListCache = mutableMapOf<String, QuickListUiState>()
     private var searchGeneration = 0
 
     init {
@@ -204,94 +164,54 @@ class MainViewModel : ViewModel() {
         repo.onMusicSourceKeyChanged()
     }
 
+    // ---- 本地首页（spec §18：本地最近播放/收藏/本地统计）----
+
     fun loadDiscover(force: Boolean = false) {
         val current = _discoverState.value
-        if (!force && (current.playlists.isNotEmpty() || current.dailySongs.isNotEmpty())) return
+        if (!force && (current.officialSongs.isNotEmpty() || current.likedCount > 0)) return
         if (current.isLoading) return
 
         viewModelScope.launch {
             _discoverState.value = current.copy(isLoading = true, error = null)
-            repo.getDiscoverHome().onSuccess { home ->
-                _discoverState.value = DiscoverUiState(
-                    banners = home.banners,
-                    playlists = home.playlists,
-                    dailySongs = home.dailySongs,
-                    newSongs = home.newSongs,
-                    isLoading = false
-                )
-            }.onFailure { e ->
-                _discoverState.value = _discoverState.value.copy(isLoading = false, error = e.message)
-            }
+            val official = repo.search("").getOrDefault(SearchResponse()).songs
+            val history = loadPlayHistory().orEmpty()
+            val recent = history.take(20)
+            _discoverState.value = DiscoverUiState(
+                officialSongs = official,
+                recentSongs = recent,
+                likedCount = jianyunFavorites.load().size,
+                isLoading = false
+            )
         }
     }
+
+    fun refreshDiscover() = loadDiscover(force = true)
+
+    /** 本地播放历史（PlayerViewModel 持久化在同一偏好，跨页面共享）。 */
+    private fun loadPlayHistory(): List<Song> {
+        val key = AppCache.KEY_PLAY_HISTORY_PREFIX + session.userId
+        return cache.get<List<Song>>(key).orEmpty()
+    }
+
+    // ---- 歌单详情（每周推荐；在线歌单在插件能力接入前不可用）----
 
     fun loadPlaylistDetail(id: Long, force: Boolean = false) {
         if (id == WEEKLY_PLAYLIST_ID) {
             loadWeeklyPlaylistDetail()
             return
         }
-        if (!force) {
-            playlistCache[id]?.let {
-                _playlistState.value = it
-                syncLoadedPlaylistToMyState(it)
-                if (it.isCompleteEnough()) return
-            }
-        }
-        if (_playlistState.value.isLoading && _playlistState.value.loadedPlaylistId == id) return
-
-        viewModelScope.launch {
-            val cachedSongs = playlistCache[id]?.songs.orEmpty()
-            _playlistState.value = PlaylistDetailUiState(
-                playlist = playlistCache[id]?.playlist,
-                songs = cachedSongs,
-                isLoading = true,
-                loadedPlaylistId = id,
-                isFullyLoaded = false
-            )
-            repo.getPlaylistTracks(id, count = 120, complete = false).onSuccess { resp ->
-                val firstState = withLocalJianyunFavorites(id, PlaylistDetailUiState(
-                    playlist = resp.playlist,
-                    songs = resp.tracks,
-                    isLoading = resp.playlist?.trackCount?.let { resp.tracks.size < it } == true,
-                    loadedPlaylistId = id,
-                    isFullyLoaded = resp.playlist?.trackCount?.let { resp.tracks.size >= it } ?: true
-                ))
-                playlistCache[id] = firstState
-                _playlistState.value = firstState
-                syncLoadedPlaylistToMyState(firstState)
-
-                if (!firstState.isFullyLoaded) {
-                    repo.getPlaylistTracks(id, count = 100000, complete = true).onSuccess { fullResp ->
-                        val fullState = withLocalJianyunFavorites(id, PlaylistDetailUiState(
-                            playlist = fullResp.playlist,
-                            songs = fullResp.tracks,
-                            isLoading = false,
-                            loadedPlaylistId = id,
-                            isFullyLoaded = true
-                        ))
-                        playlistCache[id] = fullState
-                        if (_playlistState.value.loadedPlaylistId == id) {
-                            _playlistState.value = fullState
-                        }
-                        syncLoadedPlaylistToMyState(fullState)
-                    }.onFailure {
-                        val current = _playlistState.value
-                        if (current.loadedPlaylistId == id) {
-                            _playlistState.value = current.copy(isLoading = false)
-                        }
-                    }
-                }
-            }.onFailure { e ->
-                _playlistState.value = PlaylistDetailUiState(isLoading = false, error = e.message, loadedPlaylistId = id)
-            }
-        }
+        // P6T2 后本地没有在线歌单数据源；旧网易云歌单条目保留展示身份但不保证可加载（spec §12）
+        _playlistState.value = PlaylistDetailUiState(
+            isLoading = false,
+            error = "该歌单来自历史网易云数据，暂不可用",
+            loadedPlaylistId = id
+        )
     }
 
-    /** 每周推荐以标准歌单详情呈现：生成落定后水合歌单，无数据/失败时给出空态文案。 */
+    /** 每周推荐以标准歌单详情呈现（网易云相似歌曲接口移除后无数据源，保留空态）。 */
     private fun loadWeeklyPlaylistDetail() {
         if (_playlistState.value.isLoading && _playlistState.value.loadedPlaylistId == WEEKLY_PLAYLIST_ID) return
 
-        // 先切到每周歌单的 loading 态，不能在等待推荐生成时继续展示上一个普通歌单。
         _playlistState.value = PlaylistDetailUiState(
             playlist = PlaylistMeta(id = WEEKLY_PLAYLIST_ID, name = "每周推荐"),
             isLoading = true,
@@ -303,11 +223,9 @@ class MainViewModel : ViewModel() {
 
             val rec = _weeklyRecState.value
             val count = (rec as? WeeklyRecUiState.Success)?.songs?.size ?: 0
-            val cover = (rec as? WeeklyRecUiState.Success)?.songs?.firstOrNull()?.cover
             val meta = PlaylistMeta(
                 id = WEEKLY_PLAYLIST_ID,
                 name = "每周推荐",
-                cover = cover,
                 trackCount = count
             )
             val songs = hydrateWeeklyDetailSongsNow().orEmpty()
@@ -377,73 +295,15 @@ class MainViewModel : ViewModel() {
         return loadedPlaylistId > 0 && playlist != null && songs.isNotEmpty() && isFullyLoaded
     }
 
-    private fun withLocalJianyunFavorites(
-        playlistId: Long,
-        state: PlaylistDetailUiState
-    ): PlaylistDetailUiState {
-        val likedPlaylistId = _myState.value.playlists
-            .firstOrNull { MyLibraryReducer.isLikedPlaylistName(it.name) }
-            ?.id
-        if (playlistId != likedPlaylistId) return state
-        return MyLibraryReducer.mergeLocalLikedSongs(state, jianyunFavorites.load())
-    }
-
-    private fun stateFromRemoteLibrary(
-        profile: UserProfile,
-        playlists: List<Playlist>,
-        stats: UserStats
-    ): MyUiState {
-        val playlistsWithLocalLikes = MyLibraryReducer.addLocalLikedCount(
-            playlists = playlists,
-            localLikedCount = jianyunFavorites.load().size
-        )
-        return MyLibraryReducer.stateFrom(profile, playlistsWithLocalLikes, stats)
-    }
-
-    private fun syncLoadedPlaylistToMyState(state: PlaylistDetailUiState) {
-        val detail = state.playlist ?: return
-        val current = _myState.value
-        if (current.playlists.none { it.id == detail.id }) return
-
-        val updatedPlaylists = current.playlists.map { playlist ->
-            if (playlist.id != detail.id) {
-                playlist
-            } else {
-                val resolvedTrackCount = maxOf(detail.trackCount, state.songs.size).takeIf { it > 0 } ?: playlist.trackCount
-                playlist.copy(
-                    name = detail.name.ifBlank { playlist.name },
-                    cover = detail.cover.takeUnless { it.isNullOrBlank() } ?: playlist.cover,
-                    trackCount = resolvedTrackCount
-                )
-            }
-        }
-        val updated = current.copy(
-            playlists = updatedPlaylists,
-            likedCount = updatedPlaylists.firstOrNull { MyLibraryReducer.isLikedPlaylistName(it.name) }?.trackCount ?: current.likedCount
-        )
-        _myState.value = updated
-    }
-
     fun onLikedSongChanged(song: Song, liked: Boolean) {
-        val likedPlaylistId = _myState.value.playlists
-            .firstOrNull { MyLibraryReducer.isLikedPlaylistName(it.name) }
-            ?.id
-            ?: return
-        val (updatedMyState, updatedPlaylistState) = MyLibraryReducer.applyLikedSongChange(
-            current = _myState.value,
-            cachedLikedPlaylist = playlistCache[likedPlaylistId],
-            song = song,
-            liked = liked
-        )
-        _myState.value = updatedMyState
-
-        updatedPlaylistState?.let { nextState ->
-            playlistCache[likedPlaylistId] = nextState
-            if (_playlistState.value.loadedPlaylistId == likedPlaylistId) {
-                _playlistState.value = nextState
-            }
-        }
+        // 本地收藏（简云官方）即时更新；legacy 网易云条目不支持点赞（spec §12）
+        if (!JianyunOfficialContent.isOfficialSongId(song.id)) return
+        jianyunFavorites.update(song, liked)
+        _myState.value = _myState.value.copy(likedCount = jianyunFavorites.load().size)
+        refreshDiscover()
     }
+
+    // ---- 搜索（本地 + 当前插件来源，单来源不兜底）----
 
     fun search(keywords: String, force: Boolean = false, committed: Boolean = false) {
         val trimmed = keywords.trim()
@@ -458,19 +318,34 @@ class MainViewModel : ViewModel() {
             _searchState.value = _searchState.value.copy(
                 query = trimmed,
                 results = emptyList(),
+                pluginResults = emptyList(),
                 isSearching = true,
                 isCommitted = committed
             )
-            repo.search(trimmed).onSuccess { resp ->
-                if (generation == searchGeneration && _searchState.value.query == trimmed) {
-                    _searchState.value = _searchState.value.copy(results = resp.songs, isSearching = false)
-                }
-            }.onFailure {
-                if (generation == searchGeneration && _searchState.value.query == trimmed) {
-                    _searchState.value = _searchState.value.copy(isSearching = false)
-                }
+            val sourceLabel = onlineSourceSettings.currentPluginId
+            val localDeferred = async { repo.search(trimmed).getOrDefault(SearchResponse()) }
+            val pluginDeferred = async {
+                repo.searchFromPlugin(trimmed, page = 1, type = "music").getOrNull()
+            }
+            val local = localDeferred.await()
+            val plugin = pluginDeferred.await()
+            if (generation == searchGeneration && _searchState.value.query == trimmed) {
+                _searchState.value = _searchState.value.copy(
+                    results = local.songs,
+                    pluginResults = plugin?.items.orEmpty(),
+                    pluginSourceLabel = sourceLabel?.let(::sourceLabel),
+                    isSearching = false
+                )
             }
         }
+    }
+
+    private fun sourceLabel(pluginId: String): String = when (pluginId) {
+        "linglan.kw" -> "酷我"
+        "linglan.kg" -> "酷狗"
+        "linglan.tx" -> "QQ音乐"
+        "linglan.wy" -> "网易云"
+        else -> pluginId
     }
 
     fun clearSearch() {
@@ -478,6 +353,8 @@ class MainViewModel : ViewModel() {
         _searchState.value = _searchState.value.copy(
             query = "",
             results = emptyList(),
+            pluginResults = emptyList(),
+            pluginSourceLabel = null,
             isSearching = false,
             isCommitted = false
         )
@@ -512,6 +389,8 @@ class MainViewModel : ViewModel() {
     private fun loadSearchHistory(): List<String> =
         cache.get<List<String>>(AppCache.KEY_SEARCH_HISTORY_PREFIX + session.userId).orEmpty()
 
+    // ---- 每周推荐（网易云相似歌曲接口移除后为休眠状态，入口已隐藏）----
+
     fun loadWeeklyRecommendation(): Job? {
         val key = currentWeeklyGenerationKey()
         if (key == null) {
@@ -530,7 +409,6 @@ class MainViewModel : ViewModel() {
             _weeklyDetailSongs.value = null
             weeklyDetailSongsKey = null
         }
-        // Error 重试必须先进入 Loading，详情页才会等待新的请求，而不是读取旧 Error。
         _weeklyRecState.value = WeeklyRecUiState.Loading
         return viewModelScope.launch {
             val result = try {
@@ -549,7 +427,7 @@ class MainViewModel : ViewModel() {
 
     private fun currentWeeklyGenerationKey(): GenerationKey? {
         val userId = session.userId
-        if (userId <= 0 || !session.isLoggedIn) return null
+        if (userId <= 0) return null
         val zoneId = ZoneId.systemDefault()
         return GenerationKey(
             userId = userId,
@@ -599,218 +477,23 @@ class MainViewModel : ViewModel() {
         }
     }
 
+    // ---- 本地资料库 ----
+
     fun loadMyData(force: Boolean = false) {
-        if (!force && !_myState.value.isLoading && (_myState.value.profile != null || _myState.value.playlists.isNotEmpty())) return
+        if (!force && !_myState.value.isLoading && _myState.value.profile != null) return
 
         viewModelScope.launch {
             _myState.value = _myState.value.copy(isLoading = true)
-            val cachedProfile = session.profile
-            val profile = if (cachedProfile == null || cachedProfile.userId <= 0 || cachedProfile.nickname.isBlank()) {
-                repo.refreshSession().getOrNull()?.takeIf { it.loggedIn }
-                session.profile
-            } else {
-                cachedProfile
-            }
-            if (profile != null) {
-                repo.getUserPlaylists().onSuccess { playlists ->
-                    val stats = repo.getUserStats().getOrDefault(UserStats())
-                    _myState.value = stateFromRemoteLibrary(profile, playlists, stats)
-                }.onFailure {
-                    val stats = repo.getUserStats().getOrDefault(UserStats())
-                    _myState.value = MyLibraryReducer.stateFrom(profile, _myState.value.playlists, stats)
-                }
-            } else {
-                repo.refreshSession().onSuccess { status ->
-                    val p = if (status.loggedIn) session.profile else null
-                    if (p != null) {
-                        repo.getUserPlaylists().onSuccess { playlists ->
-                            val stats = repo.getUserStats().getOrDefault(UserStats())
-                            _myState.value = stateFromRemoteLibrary(p, playlists, stats)
-                        }.onFailure {
-                            val stats = repo.getUserStats().getOrDefault(UserStats())
-                            _myState.value = MyLibraryReducer.stateFrom(p, emptyList(), stats)
-                        }
-                    } else {
-                        _myState.value = MyUiState(isLoading = false)
-                    }
-                }.onFailure {
-                    _myState.value = MyUiState(isLoading = false)
-                }
-            }
-        }
-    }
-
-    fun loadQuickList(type: String, force: Boolean = false) {
-        if (!force) {
-            quickListCache[type]?.let {
-                _quickListState.value = it
-                return
-            }
-            cache.get<QuickListUiState>(AppCache.KEY_QUICK_PREFIX + type)?.let {
-                quickListCache[type] = it
-                _quickListState.value = it
-                return
-            }
-        }
-        if (_quickListState.value.isLoading && _quickListState.value.loadedType == type) return
-
-        viewModelScope.launch {
-            val title = when (type) {
-                "fm" -> "私人FM"
-                "podcast" -> "播客推荐"
-                "rank" -> "排行榜"
-                "playlist" -> "热门歌单"
-                else -> "推荐"
-            }
-            _quickListState.value = QuickListUiState(title = title, isLoading = true, loadedType = type)
-            val result = when (type) {
-                "fm" -> repo.getPrivateFm()
-                "podcast" -> repo.getPodcastPrograms()
-                "rank" -> repo.getRankings()
-                "playlist" -> repo.getHotPlaylists()
-                else -> repo.getHotPlaylists()
-            }
-            result.onSuccess { entries ->
-                val state = QuickListUiState(title = title, entries = entries, isLoading = false, loadedType = type)
-                quickListCache[type] = state
-                _quickListState.value = state
-                if (entries.isNotEmpty()) {
-                    cache.put(AppCache.KEY_QUICK_PREFIX + type, state)
-                }
-            }.onFailure { e ->
-                _quickListState.value = QuickListUiState(title = title, isLoading = false, error = e.message, loadedType = type)
-            }
-        }
-    }
-
-    fun loginWithCookie(cookie: String) {
-        viewModelScope.launch {
-            if (!cookie.contains("MUSIC_U")) {
-                _loginState.value = LoginUiState(error = "尚未检测到登录状态，请完成登录后再点“我已登录”。")
-                return@launch
-            }
-            _loginState.value = LoginUiState(isLoggingIn = true)
-            repo.loginByCookie(cookie).onSuccess { resp ->
-                if (resp.loggedIn) {
-                    _loginState.value = LoginUiState(qrCode = 803)
-                    _appState.value = AppUiState(isLoggedIn = true)
-                    loadMyData(force = true)
-                } else {
-                    _loginState.value = LoginUiState(error = resp.error ?: "登录失败，请重试。")
-                    _appState.value = AppUiState(isLoggedIn = false)
-                }
-            }.onFailure { e ->
-                _loginState.value = LoginUiState(error = e.message ?: "登录失败，请重试。")
-                _appState.value = AppUiState(isLoggedIn = false)
-            }
-        }
-    }
-
-    fun refreshQrLogin() {
-        qrPollingJob?.cancel()
-        viewModelScope.launch {
-            _loginState.value = LoginUiState(isLoggingIn = true)
-            repo.getQrLoginKey().onSuccess { key ->
-                repo.createQrLoginCode(key).onSuccess { qr ->
-                    if (qr.img.isNullOrBlank()) {
-                        _loginState.value = LoginUiState(error = qr.error ?: "二维码生成失败，请重试。")
-                        return@onSuccess
-                    }
-                    _loginState.value = LoginUiState(qrImg = qr.img, qrKey = key, qrCode = 801)
-                    startQrPolling(key)
-                }.onFailure { e ->
-                    _loginState.value = LoginUiState(error = e.message ?: "二维码生成失败，请重试。")
-                }
-            }.onFailure { e ->
-                _loginState.value = LoginUiState(error = e.message ?: "二维码生成失败，请重试。")
-            }
-        }
-    }
-
-    private fun startQrPolling(key: String) {
-        qrPollingJob?.cancel()
-        qrPollingJob = viewModelScope.launch {
-            while (true) {
-                delay(1800)
-                repo.checkQrLoginCode(key).onSuccess { resp ->
-                    when (resp.code) {
-                        800 -> {
-                            _loginState.value = _loginState.value.copy(
-                                qrCode = resp.code,
-                                error = "二维码已过期，请刷新后重试。"
-                            )
-                            return@launch
-                        }
-                        801, 802 -> {
-                            _loginState.value = _loginState.value.copy(
-                                qrCode = resp.code,
-                                error = resp.message
-                            )
-                        }
-                        803 -> {
-                            repo.refreshSession()
-                            _loginState.value = _loginState.value.copy(qrCode = resp.code, error = null)
-                            _appState.value = AppUiState(isLoggedIn = session.isLoggedIn)
-                            if (session.isLoggedIn) {
-                                loadMyData(force = true)
-                            }
-                            return@launch
-                        }
-                        else -> {
-                            _loginState.value = _loginState.value.copy(
-                                qrCode = resp.code,
-                                error = resp.message ?: resp.error
-                            )
-                        }
-                    }
-                }.onFailure { e ->
-                    _loginState.value = _loginState.value.copy(error = e.message ?: "二维码状态检查失败。")
-                    return@launch
-                }
-            }
-        }
-    }
-
-    fun checkLoginStatus() {
-        viewModelScope.launch {
-            repo.refreshSession()
-            _appState.value = AppUiState(isLoggedIn = session.isLoggedIn)
-        }
-    }
-
-    fun logout() {
-        viewModelScope.launch {
-            qrPollingJob?.cancel()
-            val userId = session.userId
-            // 严格顺序：① invalidate → ② cancelInFlight → ③ clearWeeklyUserData
-            val cleanupResult = logoutCoordinator.execute(userId)
-            if (!cleanupResult.success) {
-                Log.e(
-                    "MainViewModel",
-                    "weekly data cleanup failed: room=${cleanupResult.roomCleared} cache=${cleanupResult.recommendationCacheCleared}"
-                )
-                _logoutCleanupWarning.value = "部分本地数据清理失败"
-            }
-            _appState.value = AppUiState(isLoggedIn = false)
-            _loginState.value = LoginUiState()
-            _myState.value = MyUiState(isLoading = false)
-            _weeklyRecState.value = WeeklyRecUiState.Loading
-            weeklySettledKey = null
-            weeklyRequestedKey = null
-            _weeklyDetailSongs.value = null
-            weeklyDetailSongsKey = null
-            _weeklyDetailLoading.value = false
-            weeklyDetailLoadingKey = null
-            playlistCache.clear()
-            artistDetailCache.clear()
-            quickListCache.clear()
-            _discoverState.value = DiscoverUiState()
-            _artistDetailState.value = ArtistDetailUiState()
-            cache.clearUserData()
-            repo.logout()
-            session.clear()
-            CookieManager.getInstance().removeAllCookies(null)
-            CookieManager.getInstance().flush()
+            val likedCount = jianyunFavorites.load().size
+            val profile = session.profile ?: UserProfile(
+                userId = session.userId,
+                nickname = "本地用户"
+            )
+            _myState.value = MyUiState(
+                profile = profile,
+                likedCount = likedCount,
+                isLoading = false
+            )
         }
     }
 }

@@ -4,6 +4,10 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.ncm.app.data.model.UserProfile
 
+/**
+ * 本地会话（P6T2 后）：网易云 Cookie/登录态已移除。
+ * 仅保留本地用户标识（匿名 0）、播放音质偏好与会话版本号。
+ */
 class SessionManager(context: Context) {
 
     private val prefs: SharedPreferences =
@@ -25,10 +29,6 @@ class SessionManager(context: Context) {
         get() = prefs.getInt("vip_type", 0)
         set(value) = prefs.edit().putInt("vip_type", value).apply()
 
-    var cookie: String
-        get() = prefs.getString("cookie", "") ?: ""
-        set(value) = prefs.edit().putString("cookie", value).apply()
-
     var playbackQuality: String
         get() = prefs.getString("playback_quality", "STANDARD") ?: "STANDARD"
         set(value) = prefs.edit().putString("playback_quality", value).apply()
@@ -42,15 +42,12 @@ class SessionManager(context: Context) {
         sessionGeneration++
     }
 
-    var qrDeviceId: String
-        get() = prefs.getString("qr_device_id", "") ?: ""
-        set(value) = prefs.edit().putString("qr_device_id", value).apply()
-
+    /** 本地模式：无在线账号登录（网易云登录已移除）。 */
     val isLoggedIn: Boolean
-        get() = cookie.contains("MUSIC_U")
+        get() = false
 
     val profile: UserProfile?
-        get() = if (isLoggedIn) UserProfile(userId, nickname, avatar.ifEmpty { null }, vipType) else null
+        get() = UserProfile(userId, nickname.ifBlank { "本地用户" }, avatar.ifEmpty { null }, vipType)
 
     fun saveLoginInfo(userId: Long, nickname: String, avatar: String?, vipType: Int) {
         this.userId = userId
@@ -58,10 +55,6 @@ class SessionManager(context: Context) {
         this.avatar = avatar ?: ""
         this.vipType = vipType
         sessionGeneration++
-    }
-
-    fun saveCookie(cookie: String) {
-        this.cookie = cookie
     }
 
     fun clear() {

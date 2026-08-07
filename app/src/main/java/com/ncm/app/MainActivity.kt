@@ -171,9 +171,8 @@ fun MainApp() {
     var retainedPlayerSongId by remember { mutableStateOf<Long?>(null) }
 
     val activePlayerSongId = playerOverlaySongId ?: routedPlayerSongId
-    val showBottomBar = appState.isLoggedIn && currentRoute != Routes.LOGIN
-    val showMiniPlayer = currentRoute != Routes.LOGIN &&
-        activePlayerSongId == null &&
+    val showBottomBar = true
+    val showMiniPlayer = activePlayerSongId == null &&
         playerState.currentSong != null &&
         !miniPlayerBlocked
     val focusManager = LocalFocusManager.current
@@ -212,18 +211,7 @@ fun MainApp() {
     }
 
     val context = LocalContext.current
-    LaunchedEffect(appState.isLoggedIn, currentRoute) {
-        if (!appState.isLoggedIn && currentRoute != null && currentRoute != Routes.LOGIN) {
-            navController.navigate(Routes.LOGIN) {
-                popUpTo(0) { inclusive = true }
-            }
-            val warning = mainViewModel.logoutCleanupWarning.value
-            if (warning != null) {
-                Toast.makeText(context, warning, Toast.LENGTH_LONG).show()
-                mainViewModel.consumeLogoutCleanupWarning()
-            }
-        }
-    }
+    // P6T2：网易云登录已移除，不再存在登出跳转
 
     val onBottomNavigate: (String) -> Unit = remember(navController) {
         { route ->
@@ -292,10 +280,13 @@ fun MainApp() {
                 ) {
                     NavGraph(
                         navController = navController,
-                        isLoggedIn = appState.isLoggedIn,
                         mainViewModel = mainViewModel,
                         playerViewModel = playerViewModel,
                         onOpenPlayer = onOpenPlayer,
+                        onOpenPluginTrack = { track ->
+                            // 插件轨道播放：直接经 PlaybackResolver 解析入队（spec §4）
+                            playerViewModel.playPluginTrack(track)
+                        },
                         modifier = Modifier.fillMaxSize()
                     )
 

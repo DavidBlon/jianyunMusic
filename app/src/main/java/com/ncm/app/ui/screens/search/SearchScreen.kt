@@ -35,6 +35,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun SearchScreen(
     onSongClick: (Long) -> Unit,
+    onPluginSongClick: (com.ncm.app.plugin.model.OnlineTrack) -> Unit,
     onArtistClick: (Long) -> Unit,
     onPlayNext: (Song) -> Unit,
     viewModel: MainViewModel = viewModel()
@@ -117,7 +118,80 @@ fun SearchScreen(
                         onPlayNext = { onPlayNext(song) }
                     )
                 }
+                if (state.pluginResults.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = "在线来源：${state.pluginSourceLabel ?: "插件"}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Green500,
+                            modifier = Modifier.padding(start = 20.dp, top = 14.dp, bottom = 4.dp)
+                        )
+                    }
+                }
+                items(state.pluginResults, key = { it.key.asComposite() }) { track ->
+                    PluginSongItem(
+                        track = track,
+                        onClick = { onPluginSongClick(track) }
+                    )
+                }
+                if (!state.isSearching && state.results.isEmpty() && state.pluginResults.isEmpty() && state.isCommitted) {
+                    item {
+                        Text(
+                            "没有找到相关歌曲",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextTertiary,
+                            modifier = Modifier.padding(start = 20.dp, top = 16.dp)
+                        )
+                    }
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun PluginSongItem(
+    track: com.ncm.app.plugin.model.OnlineTrack,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .glassSurface(RoundedCornerShape(10.dp), elevation = 6.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            if (!track.artworkUrl.isNullOrBlank()) {
+                coil.compose.AsyncImage(
+                    model = track.artworkUrl,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                track.title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                track.artists.joinToString("/") { it.name },
+                style = MaterialTheme.typography.labelSmall,
+                color = TextTertiary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }

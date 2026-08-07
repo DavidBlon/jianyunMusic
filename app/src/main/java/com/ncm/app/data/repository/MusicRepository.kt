@@ -1,138 +1,89 @@
 package com.ncm.app.data.repository
 
-import android.graphics.Bitmap
-import android.graphics.Color
-import android.util.Base64
 import android.util.Log
-import com.google.gson.JsonArray
-import com.google.gson.JsonElement
-import com.google.gson.JsonObject
-import com.google.gson.JsonParser
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.MultiFormatWriter
-import com.ncm.app.BuildConfig
 import com.ncm.app.data.SessionManager
-import com.ncm.app.data.MusicSourceSettings
-import com.ncm.app.data.api.NeteaseApi
-import com.ncm.app.data.cache.LinglanAudioCache
-import com.ncm.app.data.model.*
+import com.ncm.app.data.model.LyricResponse
+import com.ncm.app.data.model.SearchResponse
+import com.ncm.app.data.model.Song
+import com.ncm.app.data.model.SongUrlResponse
 import com.ncm.app.domain.weekly.SimilarSong
 import com.ncm.app.domain.weekly.WeeklyRecommendationSource
 import com.ncm.app.plugin.PluginSearchService
+import com.ncm.app.plugin.provider.SearchOutcome
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
-import okhttp3.FormBody
 import okhttp3.Request
-import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
-import kotlin.random.Random
 
+/**
+ * 简云资料库（P6T2 后）：本地（简云官方目录）+ 插件在线来源。
+ * 网易云 API/登录/Cookie/兜底链已移除（spec §13）：网易云旧数据作为 legacy
+ * 只读记录保留在本地（P5），不再有平台专用解析逻辑。
+ */
 class MusicRepository(
-    private val api: NeteaseApi,
-    private val session: SessionManager,
-    private val linglanAudioCache: LinglanAudioCache,
-    private val musicSourceSettings: MusicSourceSettings,
     private val pluginSearchService: PluginSearchService? = null
 ) : WeeklyRecommendationSource {
 
     private companion object {
-        private const val QR_LOGIN_URL_PREFIX = "https://music.163.com/login?codekey="
-        private const val NEW_SONG_CHART_FALLBACK_ID = 3779629L
         private const val NETWORK_MAX_ATTEMPTS = 3
         private const val NETWORK_RETRY_DELAY_MS = 450L
-        private const val OFFICIAL_SONG_URL_TIMEOUT_MS = 6_000L
-        private const val PLAYLIST_INITIAL_TRACK_LIMIT = 120
-        private const val PLAYLIST_FULL_TRACK_LIMIT = 100000
         private const val JIANYUN_CATALOG_CACHE_MS = 60_000L
-        private const val PLAYBACK_USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.0.18.203152"
+        private const val CATALOG_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    private val qrHttp = OkHttpClient.Builder()
+    private val catalogHttp = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
-    private val mediaProbeHttp = OkHttpClient.Builder()
-        .connectTimeout(2, TimeUnit.SECONDS)
-        .readTimeout(3, TimeUnit.SECONDS)
-        .writeTimeout(2, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
-    private var qrSessionCookie: String = ""
     private val jianyunCatalogMutex = Mutex()
     private var jianyunCatalogSongs: List<Song>? = null
     private var jianyunCatalogFetchedAt: Long = 0L
 
-    suspend fun getDiscoverHome(): Result<DiscoverHomeResponse> = safeCall {
-        val banners = api.getBanners().array("banners").mapNotNull { it.objOrNull()?.toBanner() }
-        val playlists = api.getPersonalizedPlaylists().array("result").mapNotNull { it.objOrNull()?.toPinnedPlaylist() }
-        val dailySongs = playlists.firstOrNull()?.let { playlist ->
-            getPlaylistTracks(playlist.id).getOrNull()?.tracks?.take(12)
-        }.orEmpty()
-        val newSongChart = api.getToplistDetail()
-            .array("list")
-            .mapNotNull { it.objOrNull() }
-            .firstOrNull { chart -> chart.string("name").orEmpty().contains("新歌") }
-        // 榜单接口已带 tracks（含封面），直接用，避免再发一次可能失败的歌单请求导致广告位封面为空
-        val newSongs = newSongChart
-            ?.array("tracks")
-            ?.mapNotNull { it.objOrNull()?.toSong() }
-            ?.take(5)
-            .orEmpty()
-            .ifEmpty {
-                val chartId = newSongChart?.long("id")?.takeIf { it > 0 } ?: NEW_SONG_CHART_FALLBACK_ID
-                getPlaylistTracks(chartId).getOrNull()?.tracks?.take(5).orEmpty()
-            }
-        DiscoverHomeResponse(banners = banners, playlists = playlists, dailySongs = dailySongs, newSongs = newSongs)
+    // ---- 在线推荐（依赖网易云相似歌曲/推荐歌单的入口已隐藏，spec §18）----
+
+    override suspend fun getSimilarSongs(songId: Long): List<SimilarSong> = emptyList()
+
+    suspend fun getSimilarSongsResult(songId: Long): Result<List<SimilarSong>> = Result.success(emptyList())
+
+    override suspend fun getSongDetails(ids: List<Long>): List<Song> =
+        getSongDetail(ids).getOrThrow()
+
+    fun onMusicSourceKeyChanged() {
+        // 兜底链已移除（P6T1）：卡密变更不再需要重置任何状态
+    }
+
+    // ---- 搜索 ----
+
+    /** 本地搜索：简云官方目录（本地能力不依赖聆澜授权，GC #13）。 */
+    suspend fun search(keywords: String, type: Int = 1, offset: Int = 0): Result<SearchResponse> {
+        val officialSongs = if (type == 1) getJianyunCatalogSongs() else emptyList()
+        val localSongs = JianyunOfficialContent.searchSongs(keywords, officialSongs)
+        return Result.success(
+            SearchResponse(
+                songs = localSongs,
+                songCount = localSongs.size
+            )
+        )
     }
 
     /** 插件来源搜索：委托给当前来源的插件，失败不跨来源兜底（GC #6）。 */
-    suspend fun searchFromPlugin(query: String, page: Int, type: String): Result<com.ncm.app.plugin.provider.SearchOutcome> {
+    suspend fun searchFromPlugin(query: String, page: Int, type: String): Result<SearchOutcome> {
         val service = pluginSearchService
             ?: return Result.failure(IllegalStateException("插件搜索服务未配置"))
         return service.search(query, page, type)
     }
 
-    suspend fun search(keywords: String, type: Int = 1, offset: Int = 0): Result<SearchResponse> {
-        val officialSongs = if (type == 1) getJianyunCatalogSongs() else emptyList()
-        val localSongs = JianyunOfficialContent.searchSongs(keywords, officialSongs)
-        val remoteResult = safeCall {
-            val result = api.search(keywords, type, offset = offset).obj("result")
-            SearchResponse(
-                songs = result.array("songs").mapNotNull { it.objOrNull()?.toSong() },
-                songCount = result.int("songCount")
-            )
-        }
-        return remoteResult.fold(
-            onSuccess = { remote ->
-                Result.success(
-                    if (type == 1) {
-                        JianyunOfficialContent.mergeSearchResponse(keywords, remote, officialSongs)
-                    } else {
-                        remote
-                    }
-                )
-            },
-            onFailure = { error ->
-                if (localSongs.isNotEmpty()) {
-                    Result.success(SearchResponse(songs = localSongs, songCount = localSongs.size))
-                } else {
-                    Result.failure(error)
-                }
-            }
-        )
-    }
+    // ---- 歌曲详情/播放/歌词（仅简云官方；网易云 legacy 不可播放，spec §12）----
 
     suspend fun getSongDetail(ids: List<Long>): Result<List<Song>> {
         val requestedIds = ids.distinct()
@@ -142,182 +93,40 @@ class MusicRepository(
         } else {
             emptyMap()
         }
-        val remoteIds = requestedIds.filterNot(JianyunOfficialContent::isOfficialSongId)
-        if (remoteIds.isEmpty()) {
-            return Result.success(requestedIds.mapNotNull(officialById::get))
-        }
-
-        return safeCall {
-            val remoteById = api.getSongDetail(remoteIds.joinToString(",", prefix = "[", postfix = "]"))
-                .array("songs")
-                .mapNotNull { it.objOrNull()?.toSong() }
-                .associateBy(Song::id)
-            requestedIds.mapNotNull { id ->
-                officialById[id] ?: remoteById[id]
-            }
-        }
-    }
-
-    override suspend fun getSimilarSongs(songId: Long): List<SimilarSong> =
-        getSimilarSongsResult(songId).getOrThrow()
-
-    suspend fun getSimilarSongsResult(songId: Long): Result<List<SimilarSong>> = safeCall {
-        if (JianyunOfficialContent.isOfficialSongId(songId)) return@safeCall emptyList()
-        val root = api.getSimilarSongs(songId)
-        if (BuildConfig.DEBUG) Log.d("SimiDebug", "similar songs root: $root")
-        parseSimilarSongs(root)
-    }
-
-    override suspend fun getSongDetails(ids: List<Long>): List<Song> =
-        getSongDetail(ids).getOrThrow()
-
-    fun onMusicSourceKeyChanged() {
-        // P6T1：聆澜/酷狗兜底链已移除，卡密变更不再需要重置熔断器
+        return Result.success(requestedIds.mapNotNull(officialById::get))
     }
 
     suspend fun getSongUrl(songId: Long, br: Int = 128000, fee: Int = 0): Result<SongUrlResponse> = safeCall {
         getJianyunSongUrlResponse(songId, br)?.let { return@safeCall it }
-        // P6T1 后仅保留官方来源；播放失败由插件/用户重试，不再自动切换兜底音源（GC #6）
-        val item = api.getSongUrl("[$songId]", br).array("data").firstOrNull()?.objOrNull()
-        val rawUrl = item?.string("url")
-        val playableUrl = rawUrl?.replaceFirst("http://", "https://")
-        val code = item?.int("code") ?: 404
+        SongUrlResponse(
+            url = null,
+            br = br,
+            code = 404,
+            loggedIn = false,
+            error = "该歌曲是历史网易云条目，暂不可播放（可在设置中迁移到当前来源）"
+        )
+    }
 
-        if (!playableUrl.isNullOrBlank() && shouldUseOfficialMediaUrl(playableUrl)) {
-            SongUrlResponse(
-                url = playableUrl,
-                source = "netease",
-                br = item?.int("br") ?: 0,
-                size = item?.long("size") ?: 0,
-                type = item?.string("type"),
-                encodeType = item?.string("encodeType"),
-                freeTrialInfo = item?.get("freeTrialInfo"),
-                code = code,
-                loggedIn = session.isLoggedIn,
-                error = null
-            )
+    suspend fun getSongUrlWithFallbackTimeout(songId: Long, br: Int = 128000, fee: Int = 0): Result<SongUrlResponse> =
+        getSongUrl(songId, br, fee)
+
+    suspend fun getSongUrlForPrefetch(songId: Long, br: Int = 128000, fee: Int = 0): Result<SongUrlResponse> =
+        getSongUrl(songId, br, fee)
+
+    suspend fun getLyric(id: Long): Result<LyricResponse> = safeCall {
+        if (JianyunOfficialContent.isOfficialSongId(id)) LyricResponse() else LyricResponse()
+    }
+
+    /** 歌手详情：仅简云官方歌手（网易云歌手接口已移除）。 */
+    suspend fun getArtistDetail(id: Long): Result<com.ncm.app.data.model.ArtistDetail> = safeCall {
+        if (id == JianyunOfficialContent.ARTIST_ID) {
+            JianyunOfficialContent.artist(getJianyunCatalogSongs())
         } else {
-            SongUrlResponse(
-                url = null,
-                br = item?.int("br") ?: 0,
-                size = item?.long("size") ?: 0,
-                code = code,
-                loggedIn = session.isLoggedIn,
-                error = playbackUnavailableMessage(item, null, code, fee)
-            )
+            throw IOException("该歌手来自历史网易云数据，详情暂不可用")
         }
     }
 
-    suspend fun getSongUrlWithFallbackTimeout(songId: Long, br: Int = 128000, fee: Int = 0): Result<SongUrlResponse> = safeCall {
-        getJianyunSongUrlResponse(songId, br)?.let { return@safeCall it }
-        val item = withTimeoutOrNull(OFFICIAL_SONG_URL_TIMEOUT_MS) {
-            runCatching {
-                api.getSongUrl("[$songId]", br).array("data").firstOrNull()?.objOrNull()
-            }.getOrNull()
-        }
-        val rawUrl = item?.string("url")
-        val playableUrl = rawUrl?.replaceFirst("http://", "https://")
-        val code = item?.int("code") ?: 404
-
-        if (!playableUrl.isNullOrBlank() && shouldUseOfficialMediaUrl(playableUrl)) {
-            SongUrlResponse(
-                url = playableUrl,
-                source = "netease",
-                br = item?.int("br") ?: 0,
-                size = item?.long("size") ?: 0,
-                type = item?.string("type"),
-                encodeType = item?.string("encodeType"),
-                freeTrialInfo = item?.get("freeTrialInfo"),
-                code = code,
-                loggedIn = session.isLoggedIn,
-                error = null
-            )
-        } else {
-            SongUrlResponse(
-                url = null,
-                br = item?.int("br") ?: 0,
-                size = item?.long("size") ?: 0,
-                code = code,
-                loggedIn = session.isLoggedIn,
-                error = playbackUnavailableMessage(item, null, code, fee)
-            )
-        }
-    }
-
-    /**
-     * 队列预取：仅解析直接可播来源（简云官方 + 网易云官方）；P6T1 后不再有酷狗分支。
-     */
-    suspend fun getSongUrlForPrefetch(
-        songId: Long,
-        br: Int = 128000,
-        fee: Int = 0
-    ): Result<SongUrlResponse> = safeCall {
-        getJianyunSongUrlResponse(songId, br)?.let { return@safeCall it }
-        val item = withTimeoutOrNull(OFFICIAL_SONG_URL_TIMEOUT_MS) {
-            runCatching {
-                api.getSongUrl("[$songId]", br).array("data").firstOrNull()?.objOrNull()
-            }.getOrNull()
-        }
-        val playableUrl = item?.string("url")?.replaceFirst("http://", "https://")
-        val code = item?.int("code") ?: 404
-
-        if (!playableUrl.isNullOrBlank() && shouldUseOfficialMediaUrl(playableUrl)) {
-            SongUrlResponse(
-                url = playableUrl,
-                source = PlaybackSource.NETEASE,
-                br = item?.int("br") ?: 0,
-                size = item?.long("size") ?: 0,
-                type = item?.string("type"),
-                encodeType = item?.string("encodeType"),
-                freeTrialInfo = item?.get("freeTrialInfo"),
-                code = code,
-                loggedIn = session.isLoggedIn,
-                error = null
-            )
-        } else {
-            SongUrlResponse(
-                url = null,
-                br = item?.int("br") ?: 0,
-                size = item?.long("size") ?: 0,
-                code = code,
-                loggedIn = session.isLoggedIn,
-                error = playbackUnavailableMessage(item, null, code, fee)
-            )
-        }
-    }
-
-    private suspend fun shouldUseOfficialMediaUrl(url: String): Boolean {
-        return when (probeOfficialMediaUrl(url)) {
-            true -> true
-            false -> false
-            null -> true
-        }
-    }
-
-    private suspend fun probeOfficialMediaUrl(url: String): Boolean? = withContext(Dispatchers.IO) {
-        runCatching {
-            val request = Request.Builder()
-                .url(url)
-                .get()
-                .header("User-Agent", PLAYBACK_USER_AGENT)
-                .header("Referer", "https://music.163.com/")
-                .header("Origin", "https://music.163.com")
-                .header("Accept", "*/*")
-                .header("Range", "bytes=0-0")
-                .apply {
-                    val cookie = session.cookie
-                    if (cookie.isNotBlank()) header("Cookie", cookie)
-                }
-                .build()
-            mediaProbeHttp.newCall(request).execute().use { response ->
-                when (response.code) {
-                    200, 206 -> true
-                    401, 403, 404, 410 -> false
-                    else -> null
-                }
-            }
-        }.getOrNull()
-    }
+    // ---- 简云官方目录 ----
 
     private suspend fun getJianyunCatalogSongs(): List<Song> = withContext(Dispatchers.IO) {
         jianyunCatalogMutex.withLock {
@@ -326,16 +135,15 @@ class MusicRepository(
             if (cached != null && now - jianyunCatalogFetchedAt < JIANYUN_CATALOG_CACHE_MS) {
                 return@withLock cached
             }
-
             val fetched = runCatching {
                 val request = Request.Builder()
                     .url(JianyunOfficialContent.catalogUrl)
                     .get()
                     .header("Accept", "application/json")
                     .header("Cache-Control", "no-cache")
-                    .header("User-Agent", PLAYBACK_USER_AGENT)
+                    .header("User-Agent", CATALOG_USER_AGENT)
                     .build()
-                qrHttp.newCall(request).execute().use { response ->
+                catalogHttp.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         throw IOException("简云音乐目录请求失败：HTTP ${response.code}")
                     }
@@ -361,304 +169,7 @@ class MusicRepository(
         return JianyunOfficialContent.songUrlResponse(song, bitrate)
     }
 
-    suspend fun getLyric(id: Long): Result<LyricResponse> = safeCall {
-        if (JianyunOfficialContent.isOfficialSongId(id)) return@safeCall LyricResponse()
-        val body = api.getLyric(id)
-        LyricResponse(
-            lyric = body.obj("lrc").string("lyric").orEmpty(),
-            tlyric = body.obj("tlyric").string("lyric").orEmpty(),
-            yrc = body.obj("yrc").string("lyric").orEmpty()
-        )
-    }
-
-    suspend fun getArtistDetail(id: Long): Result<ArtistDetail> = safeCall {
-        if (id == JianyunOfficialContent.ARTIST_ID) {
-            return@safeCall JianyunOfficialContent.artist(getJianyunCatalogSongs())
-        }
-        require(id > 0) { "歌手 ID 无效" }
-
-        val overview = api.getArtistOverview(id)
-        val artist = overview.obj("artist")
-        if (artist.size() == 0) {
-            throw IOException("未找到歌手信息")
-        }
-
-        val introduction = runCatching { api.getArtistIntroduction(id) }.getOrNull()
-        val briefDescription = (
-            artist.string("briefDesc")
-                ?: introduction?.string("briefDesc")
-            ).orEmpty().trim()
-        val fullDescription = introduction
-            ?.array("introduction")
-            ?.mapNotNull { entry ->
-                val section = entry.objOrNull() ?: return@mapNotNull null
-                val title = section.string("ti").orEmpty().trim()
-                val text = section.string("txt").orEmpty().trim()
-                when {
-                    title.isBlank() -> text.takeIf { it.isNotBlank() }
-                    text.isBlank() -> title
-                    else -> "$title\n$text"
-                }
-            }
-            ?.joinToString("\n\n")
-            .orEmpty()
-            .ifBlank { briefDescription }
-
-        ArtistDetail(
-            id = artist.long("id").takeIf { it > 0 } ?: id,
-            name = artist.string("name").orEmpty().ifBlank { "未知歌手" },
-            avatarUrl = (
-                artist.string("picUrl")
-                    ?: artist.string("img1v1Url")
-                    ?: artist.string("cover")
-                )?.httpsUrl(),
-            aliases = artist.array("alias")
-                .mapNotNull { alias -> runCatching { alias.asString.trim() }.getOrNull() }
-                .filter { it.isNotBlank() },
-            briefDescription = briefDescription,
-            fullDescription = fullDescription,
-            musicCount = artist.int("musicSize"),
-            albumCount = artist.int("albumSize"),
-            mvCount = artist.int("mvSize"),
-            hotSongs = overview.array("hotSongs")
-                .mapNotNull { it.objOrNull()?.toSong() }
-        )
-    }
-
-    suspend fun getPlaylistTracks(
-        id: Long,
-        count: Int = PLAYLIST_INITIAL_TRACK_LIMIT,
-        complete: Boolean = false
-    ): Result<PlaylistTracksResponse> = safeCall {
-        val body = api.getPlaylistDetail(id, count = count)
-        val playlist = body.obj("playlist").takeIf { it.size() > 0 } ?: body.obj("result")
-        val tracks = playlist.array("tracks").ifEmpty { body.array("songs") }
-        PlaylistTracksResponse(
-            playlist = PlaylistMeta(
-                id = playlist.long("id").takeIf { it > 0 } ?: id,
-                name = playlist.string("name").orEmpty(),
-                cover = playlist.string("coverImgUrl")?.httpsUrl(),
-                trackCount = playlist.int("trackCount").takeIf { it > 0 } ?: tracks.size
-            ),
-            tracks = completePlaylistSongs(
-                playlist = playlist,
-                rawTracks = tracks,
-                missingLimit = if (complete) PLAYLIST_FULL_TRACK_LIMIT else (count - tracks.size).coerceAtLeast(0)
-            )
-        )
-    }
-
-    suspend fun getPrivateFm(): Result<List<QuickEntry>> = safeCall {
-        getDiscoverHome().getOrThrow().dailySongs.map { song ->
-            QuickEntry(
-                id = song.id,
-                title = song.name,
-                subtitle = song.artistText,
-                imageUrl = song.album?.picUrl
-            )
-        }
-    }
-
-    suspend fun getPodcastPrograms(): Result<List<QuickEntry>> = safeCall {
-        api.getRecommendedPrograms()
-            .array("programs")
-            .mapNotNull { item ->
-                val program = item.objOrNull() ?: return@mapNotNull null
-                val radio = program.obj("radio")
-                QuickEntry(
-                    id = program.long("id"),
-                    title = program.string("name").orEmpty(),
-                    subtitle = radio.string("name").orEmpty(),
-                    imageUrl = (program.string("coverUrl") ?: radio.string("picUrl"))?.httpsUrl()
-                ).takeIf { it.title.isNotBlank() }
-            }
-    }
-
-    suspend fun getRankings(): Result<List<QuickEntry>> = safeCall {
-        api.getToplistDetail()
-            .array("list")
-            .mapNotNull { it.objOrNull()?.toQuickEntry() }
-    }
-
-    suspend fun getHotPlaylists(): Result<List<QuickEntry>> = safeCall {
-        api.getTopPlaylists()
-            .array("playlists")
-            .mapNotNull { it.objOrNull()?.toQuickEntry() }
-    }
-
-    suspend fun getUserPlaylists(limit: Int = 50): Result<List<Playlist>> = safeCall {
-        val userId = session.userId
-        if (userId <= 0) {
-            emptyList()
-        } else {
-            api.getUserPlaylists(userId, limit)
-                .array("playlist")
-                .mapNotNull { it.objOrNull()?.toPlaylist() }
-        }
-    }
-
-    suspend fun getUserStats(): Result<UserStats> = safeCall {
-        val userId = session.userId
-        if (userId <= 0) {
-            UserStats()
-        } else {
-            val body = api.getUserDetail(userId)
-            val profile = body.obj("profile")
-            UserStats(
-                listenCount = body.int("listenSongs"),
-                followCount = profile.int("follows"),
-                fanCount = profile.int("followeds"),
-                eventCount = profile.int("eventCount")
-            )
-        }
-    }
-
-    suspend fun getLoginStatus(): Result<LoginStatusResponse> = safeCall {
-        loadAccountFromCookie()
-    }
-
-    suspend fun getQrLoginKey(): Result<String> = safeCall {
-        qrSessionCookie = ""
-        val body = postNeteaseJson(
-            url = "https://music.163.com/api/login/qrcode/unikey",
-            params = mapOf(
-                "type" to "3",
-                "timestamp" to System.currentTimeMillis().toString()
-            )
-        )
-        val key = body.obj("data").string("unikey") ?: body.string("unikey")
-        key?.takeIf { it.isNotBlank() } ?: throw IllegalStateException("无法获取二维码登录密钥")
-    }
-
-    suspend fun createQrLoginCode(key: String): Result<QrCreateResponse> = safeCall {
-        val qrUrl = "$QR_LOGIN_URL_PREFIX$key"
-        val qrImg = createQrDataUrl(qrUrl)
-        QrCreateResponse(
-            img = qrImg,
-            url = qrUrl
-        )
-    }
-
-    suspend fun checkQrLoginCode(key: String): Result<QrCheckResponse> = safeCall {
-        val (body, cookie) = postNeteaseJsonWithCookie(
-            url = "https://music.163.com/api/login/qrcode/client/login",
-            params = mapOf(
-                "key" to key,
-                "type" to "3",
-                "timestamp" to System.currentTimeMillis().toString()
-            )
-        )
-        val code = body.int("code")
-        if (code == 803) {
-            val persistentCookie = qrPersistentCookie(cookie)
-            if (persistentCookie.contains("MUSIC_U")) {
-                session.saveCookie(persistentCookie)
-            }
-            runCatching { loadAccountFromCookie() }
-        }
-        QrCheckResponse(
-            code = code,
-            message = body.string("message") ?: body.string("msg"),
-            nickname = body.string("nickname"),
-            avatar = body.string("avatarUrl"),
-            error = body.string("message") ?: body.string("msg")
-        )
-    }
-
-    suspend fun getQrKey(): Result<String> = safeCall {
-        throw UnsupportedOperationException("当前版本使用网页登录。")
-    }
-
-    suspend fun createQrCode(key: String): Result<QrCreateResponse> = safeCall {
-        throw UnsupportedOperationException("当前版本使用网页登录。")
-    }
-
-    suspend fun checkQrCode(key: String): Result<QrCheckResponse> = safeCall {
-        throw UnsupportedOperationException("当前版本使用网页登录。")
-    }
-
-    suspend fun loginByCookie(cookie: String): Result<LoginCookieResponse> = safeCall {
-        session.saveCookie(cookie)
-        val status = runCatching { loadAccountFromCookie() }
-            .getOrElse { LoginStatusResponse(loggedIn = session.cookie.contains("MUSIC_U")) }
-        LoginCookieResponse(
-            loggedIn = status.loggedIn || session.cookie.contains("MUSIC_U"),
-            saved = session.cookie.contains("MUSIC_U"),
-            userId = status.userId,
-            nickname = status.nickname,
-            avatar = status.avatar,
-            error = if (status.loggedIn || session.cookie.contains("MUSIC_U")) null else "登录状态无效，请重新登录。"
-        )
-    }
-
-    suspend fun logout(): Result<ApiStatusResponse> = safeCall {
-        session.clear()
-        ApiStatusResponse(ok = true)
-    }
-
-    suspend fun refreshSession(): Result<LoginStatusResponse> = safeCall {
-        if (session.cookie.isBlank()) {
-            LoginStatusResponse(loggedIn = false)
-        } else {
-            loadAccountFromCookie()
-        }
-    }
-
-    suspend fun likeSong(id: Long, like: Boolean = true): Result<LikeResponse> = safeCall {
-        if (!session.isLoggedIn) {
-            LikeResponse(loggedIn = false, id = id, liked = false, code = 401, error = "请先登录")
-        } else {
-            val likedPlaylistId = getLikedPlaylistId()
-            val body = if (likedPlaylistId > 0) {
-                api.manipulatePlaylistTracks(
-                    operation = if (like) "add" else "del",
-                    playlistId = likedPlaylistId,
-                    trackIds = "[$id]",
-                    timestamp = System.currentTimeMillis()
-                )
-            } else {
-                api.likeSong(
-                    alg = "itembased",
-                    songId = id,
-                    like = like,
-                    timestamp = System.currentTimeMillis()
-                )
-            }
-            val code = body.int("code").takeIf { it > 0 } ?: body.int("status").takeIf { it > 0 } ?: 200
-            LikeResponse(
-                loggedIn = true,
-                id = id,
-                liked = like,
-                code = code,
-                error = body.string("message") ?: body.string("msg")
-            )
-        }
-    }
-
-    private suspend fun getLikedPlaylistId(): Long {
-        val userId = session.userId
-        if (userId <= 0) return 0
-        return api.getUserPlaylists(userId, limit = 100)
-            .array("playlist")
-            .mapNotNull { it.objOrNull() }
-            .firstOrNull { playlist ->
-                val name = playlist.string("name").orEmpty()
-                name.contains("喜欢") || name.contains("收藏")
-            }
-            ?.long("id")
-            ?: 0
-    }
-
-    suspend fun checkLiked(ids: List<Long>): Result<Map<String, Boolean>> = safeCall {
-        val userId = session.userId
-        if (!session.isLoggedIn || userId <= 0 || ids.isEmpty()) {
-            emptyMap()
-        } else {
-            val body = api.getLikedSongIds(userId, System.currentTimeMillis())
-            val likedIds = body.array("ids").mapNotNull { it.longOrNull() }.toSet()
-            ids.associate { id -> id.toString() to likedIds.contains(id) }
-        }
-    }
+    // ---- 网络工具 ----
 
     private suspend fun <T> safeCall(call: suspend () -> T): Result<T> {
         return withContext(Dispatchers.IO) {
@@ -687,11 +198,11 @@ class MusicRepository(
     private fun Exception.toUserFacingException(): Exception {
         val friendlyMessage = when {
             this is UnknownHostException || cause is UnknownHostException ->
-                "\u7f51\u7edc\u89e3\u6790\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5 DNS \u6216\u7f51\u7edc\u540e\u91cd\u8bd5"
+                "网络解析失败，请检查 DNS 或网络后重试"
             this is SocketTimeoutException || cause is SocketTimeoutException ->
-                "\u7f51\u7edc\u8d85\u65f6\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5"
+                "网络超时，请稍后重试"
             this is IOException || cause is IOException ->
-                "\u7f51\u7edc\u8fde\u63a5\u5f02\u5e38\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5"
+                "网络连接异常，请稍后重试"
             else -> message
         }
         return if (friendlyMessage == message || friendlyMessage.isNullOrBlank()) {
@@ -699,301 +210,5 @@ class MusicRepository(
         } else {
             RuntimeException(friendlyMessage, this)
         }
-    }
-
-    private fun playbackUnavailableMessage(item: JsonObject?, playableUrl: String?, code: Int, fee: Int): String? {
-        return RepositoryPolicy.playbackUnavailableMessage(
-            hasPlayableUrl = !playableUrl.isNullOrBlank(),
-            serverMessage = item?.string("message") ?: item?.string("msg"),
-            hasFreeTrial = item?.get("freeTrialInfo")?.let { !it.isJsonNull } == true,
-            code = code,
-            fee = fee,
-            loggedIn = session.isLoggedIn
-        )
-    }
-
-    private suspend fun completePlaylistSongs(
-        playlist: JsonObject,
-        rawTracks: List<JsonElement>,
-        missingLimit: Int
-    ): List<Song> {
-        val parsedTracks = rawTracks.mapNotNull { it.objOrNull()?.toSong() }
-        val parsedById = parsedTracks.associateBy { it.id }
-        val knownIds = parsedById.keys
-        val trackIds = playlist.array("trackIds")
-            .mapNotNull { it.objOrNull()?.long("id")?.takeIf { id -> id > 0 } }
-        val missingIds = trackIds
-            .filterNot { it in knownIds }
-            .take(missingLimit)
-
-        if (trackIds.isEmpty()) return parsedTracks
-        if (missingIds.isEmpty()) return trackIds.mapNotNull { parsedById[it] }.ifEmpty { parsedTracks }
-
-        val extraSongs = missingIds
-            .chunked(200)
-            .flatMap { ids ->
-                api.getSongDetail(ids.joinToString(",", prefix = "[", postfix = "]"))
-                    .array("songs")
-                    .mapNotNull { it.objOrNull()?.toSong() }
-            }
-            .associateBy { it.id }
-
-        return trackIds
-            .mapNotNull { id -> parsedById[id] ?: extraSongs[id] }
-            .ifEmpty { parsedTracks + extraSongs.values }
-    }
-
-    private fun JsonObject.toBanner(): BannerItem? {
-        return BannerItem(
-            pic = string("pic").orEmpty().httpsUrl(),
-            targetId = long("targetId"),
-            targetType = int("targetType"),
-            typeTitle = string("typeTitle")
-        ).takeIf { it.pic.isNotBlank() }
-    }
-
-    private fun JsonObject.toPinnedPlaylist(): PinnedPlaylist? {
-        return PinnedPlaylist(
-            id = long("id"),
-            name = string("name").orEmpty(),
-            picUrl = string("picUrl")?.httpsUrl(),
-            playCount = long("playCount"),
-            trackCount = int("trackCount"),
-            copywriter = string("copywriter")
-        ).takeIf { it.id > 0 && it.name.isNotBlank() }
-    }
-
-    private fun JsonObject.toQuickEntry(): QuickEntry? {
-        return QuickEntry(
-            id = long("id"),
-            title = string("name").orEmpty(),
-            subtitle = string("copywriter") ?: string("description").orEmpty(),
-            imageUrl = (string("picUrl") ?: string("coverImgUrl"))?.httpsUrl(),
-            playCount = long("playCount")
-        ).takeIf { it.id > 0 && it.title.isNotBlank() }
-    }
-
-    private fun JsonObject.toPlaylist(): Playlist? {
-        return Playlist(
-            id = long("id"),
-            name = string("name").orEmpty(),
-            cover = string("coverImgUrl")?.httpsUrl(),
-            trackCount = int("trackCount"),
-            playCount = long("playCount"),
-            creator = obj("creator").string("nickname"),
-            subscribed = bool("subscribed")
-        ).takeIf { it.id > 0 && it.name.isNotBlank() }
-    }
-
-    private fun JsonObject.toSong(): Song? {
-        val album = objOrNull("al") ?: objOrNull("album")
-        return Song(
-            id = long("id"),
-            name = string("name").orEmpty(),
-            artists = (array("ar").ifEmpty { array("artists") })
-                .mapNotNull { it.objOrNull()?.toArtist() },
-            album = album?.let {
-                AlbumBrief(
-                    id = it.long("id"),
-                    name = it.string("name").orEmpty(),
-                    picUrl = it.string("picUrl")?.httpsUrl()
-                )
-            },
-            dt = long("dt").takeIf { it > 0 } ?: long("duration"),
-            fee = int("fee"),
-            mv = long("mv"),
-            pop = int("pop")
-        ).takeIf { it.id > 0 && it.name.isNotBlank() }
-    }
-
-    private fun JsonObject.toArtist(): ArtistBrief? {
-        return ArtistBrief(
-            id = long("id"),
-            name = string("name").orEmpty()
-        ).takeIf { it.name.isNotBlank() }
-    }
-
-    private suspend fun postNeteaseJson(
-        url: String,
-        params: Map<String, String>
-    ): JsonObject = postNeteaseJsonWithCookie(url, params).first
-
-    private suspend fun postNeteaseJsonWithCookie(
-        url: String,
-        params: Map<String, String>
-    ): Pair<JsonObject, String> = withContext(Dispatchers.IO) {
-        val form = FormBody.Builder().apply {
-            params.forEach { (key, value) -> add(key, value) }
-        }.build()
-        val request = Request.Builder()
-            .url(url)
-            .post(form)
-            .header("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 CloudMusic/9.0.0")
-            .header("Referer", "https://music.163.com/")
-            .header("Origin", "https://music.163.com")
-            .apply {
-                header("Cookie", qrRequestCookie())
-            }
-            .build()
-        qrHttp.newCall(request).execute().use { response ->
-            val responseText = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                throw IOException(responseText.ifBlank { "网易云二维码接口 ${response.code}" })
-            }
-            val cookie = response.headers.values("Set-Cookie")
-                .map { it.substringBefore(";") }
-                .filter { it.isNotBlank() }
-                .joinToString("; ")
-            if (cookie.isNotBlank()) {
-                qrSessionCookie = RepositoryPolicy.mergeCookiePairs(qrSessionCookie, cookie)
-            }
-            JsonParser.parseString(responseText).asJsonObject to cookie
-        }
-    }
-
-    private fun createQrDataUrl(content: String): String {
-        val size = 640
-        val matrix = MultiFormatWriter().encode(content, BarcodeFormat.QR_CODE, size, size)
-        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        for (y in 0 until size) {
-            for (x in 0 until size) {
-                bitmap.setPixel(x, y, if (matrix[x, y]) Color.BLACK else Color.WHITE)
-            }
-        }
-        val out = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-        bitmap.recycle()
-        return "data:image/png;base64,${Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)}"
-    }
-
-    private fun qrRequestCookie(): String {
-        return listOfNotNull(
-            qrSessionCookie.takeIf { it.isNotBlank() },
-            "sDeviceId=${qrDeviceId()}",
-            "deviceId=${qrDeviceId()}",
-            "os=pc",
-            "appver=3.1.17.204416",
-            "osver=Microsoft-Windows-10-Professional-build-19045-64bit",
-            "channel=netease",
-            "__remember_me=true"
-        ).joinToString("; ")
-    }
-
-    private fun qrPersistentCookie(finalCookie: String): String {
-        return RepositoryPolicy.mergeCookiePairs(qrRequestCookie(), finalCookie)
-    }
-
-    private fun qrDeviceId(): String {
-        val existing = session.qrDeviceId
-        if (existing.length == 52) return existing
-        val hex = "0123456789ABCDEF"
-        val generated = buildString {
-            repeat(52) {
-                append(hex[Random.nextInt(hex.length)])
-            }
-        }
-        session.qrDeviceId = generated
-        return generated
-    }
-
-    private fun JsonObject.obj(name: String): JsonObject = objOrNull(name) ?: JsonObject()
-
-    private fun JsonObject.objOrNull(name: String): JsonObject? = get(name)?.objOrNull()
-
-    private fun JsonElement.objOrNull(): JsonObject? = if (isJsonObject) asJsonObject else null
-
-    private fun JsonObject.array(name: String): List<JsonElement> {
-        val value = get(name)
-        return if (value is JsonArray) value.toList() else emptyList()
-    }
-
-    private fun JsonObject.string(name: String): String? {
-        val value = get(name)
-        return if (value != null && !value.isJsonNull) value.asString else null
-    }
-
-    private fun JsonObject.int(name: String): Int = string(name)?.toIntOrNull() ?: 0
-
-    private fun JsonObject.long(name: String): Long {
-        val value = get(name)
-        return when {
-            value == null || value.isJsonNull -> 0L
-            value.isJsonPrimitive && value.asJsonPrimitive.isNumber -> value.asDouble.toLong()
-            else -> value.asString.toDoubleOrNull()?.toLong() ?: 0L
-        }
-    }
-
-    private fun JsonElement.longOrNull(): Long? {
-        return when {
-            isJsonNull -> null
-            isJsonPrimitive && asJsonPrimitive.isNumber -> asDouble.toLong()
-            else -> asString.toDoubleOrNull()?.toLong()
-        }
-    }
-
-    private fun JsonObject.bool(name: String): Boolean {
-        val value = get(name)
-        return if (value != null && !value.isJsonNull) value.asBoolean else false
-    }
-
-    private suspend fun loadAccountFromCookie(): LoginStatusResponse {
-        val profile = api.getUserAccount().obj("profile")
-        val userId = profile.long("userId")
-        if (userId <= 0) {
-            return LoginStatusResponse(loggedIn = session.cookie.contains("MUSIC_U"))
-        }
-
-        val status = LoginStatusResponse(
-            loggedIn = true,
-            userId = userId,
-            nickname = profile.string("nickname"),
-            avatar = profile.string("avatarUrl")?.httpsUrl(),
-            vipType = profile.int("vipType")
-        )
-        session.saveLoginInfo(
-            userId = status.userId,
-            nickname = status.nickname.orEmpty(),
-            avatar = status.avatar,
-            vipType = status.vipType
-        )
-        return status
-    }
-
-    private fun String.httpsUrl(): String = replaceFirst("http://", "https://")
-
-}
-
-/**
- * 解析 /api/simi/song 返回的相似歌曲（自包含、不依赖 MusicRepository 私有 helper）。
- * 字段名以真机抓包为准；若与真实响应不符，按 Task 12 QA 调整此处并重跑
- * MusicRepositorySimilarSongsTest。
- */
-internal fun parseSimilarSongs(root: JsonObject): List<SimilarSong> {
-    val songs = root.get("songs")
-    if (songs == null || !songs.isJsonArray) return emptyList()
-    return songs.asJsonArray.mapNotNull { element ->
-        if (!element.isJsonObject) return@mapNotNull null
-        val obj = element.asJsonObject
-        val id = obj.get("id")
-            ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }
-            ?.asJsonPrimitive?.asLong ?: 0L
-        val name = obj.get("name")
-            ?.takeIf { it.isJsonPrimitive }
-            ?.asJsonPrimitive?.asString.orEmpty()
-        val artists = (obj.get("artists")
-            ?.takeIf { it.isJsonArray }
-            ?.asJsonArray ?: JsonArray())
-            .mapNotNull { artistElement ->
-                if (!artistElement.isJsonObject) return@mapNotNull null
-                val artist = artistElement.asJsonObject
-                val artistId = artist.get("id")
-                    ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }
-                    ?.asJsonPrimitive?.asLong ?: 0L
-                val artistName = artist.get("name")
-                    ?.takeIf { it.isJsonPrimitive }
-                    ?.asJsonPrimitive?.asString.orEmpty()
-                if (artistId > 0 && artistName.isNotBlank()) ArtistBrief(artistId, artistName) else null
-            }
-        SimilarSong(id, name, artists).takeIf { it.id > 0 && it.name.isNotBlank() }
     }
 }

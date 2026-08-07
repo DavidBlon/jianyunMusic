@@ -7,6 +7,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import com.ncm.app.NeteaseApp
+import com.ncm.app.data.AppCache
 import com.ncm.app.data.JianyunFavoriteStore
 import com.ncm.app.data.cache.LinglanCachePolicy
 import com.ncm.app.data.model.AlbumBrief
@@ -530,43 +531,12 @@ class PlayerViewModel : ViewModel() {
             onChanged(song, targetLiked)
             return
         }
-        viewModelScope.launch {
-            repo.likeSong(songId, targetLiked).onSuccess { resp ->
-                if (resp.loggedIn && resp.code in 200..299) {
-                    repo.checkLiked(listOf(songId)).onSuccess { likedMap ->
-                        val confirmedLiked = likedMap[songId.toString()] == true
-                        if (confirmedLiked == targetLiked) {
-                            _state.value = _state.value.copy(isLiked = confirmedLiked, isLikeUpdating = false)
-                            onChanged(song, confirmedLiked)
-                        } else {
-                            _state.value = _state.value.copy(
-                                isLiked = !targetLiked,
-                                isLikeUpdating = false,
-                                error = "喜欢状态没有同步到网易云，请稍后重试"
-                            )
-                        }
-                    }.onFailure { e ->
-                        _state.value = _state.value.copy(
-                            isLiked = !targetLiked,
-                            isLikeUpdating = false,
-                            error = e.message ?: "无法确认网易云喜欢状态"
-                        )
-                    }
-                } else {
-                    _state.value = _state.value.copy(
-                        isLiked = !targetLiked,
-                        isLikeUpdating = false,
-                        error = resp.error ?: "喜欢操作失败，请稍后重试"
-                    )
-                }
-            }.onFailure { e ->
-                _state.value = _state.value.copy(
-                    isLiked = !targetLiked,
-                    isLikeUpdating = false,
-                    error = e.message ?: "喜欢操作失败，请稍后重试"
-                )
-            }
-        }
+        // P6T2：网易云喜欢接口已移除；legacy 条目不支持点赞（spec §12）
+        _state.value = _state.value.copy(
+            isLiked = false,
+            isLikeUpdating = false,
+            error = "历史网易云条目不支持点赞，可先迁移到当前来源"
+        )
     }
 
     fun refreshLinglanCacheStats() {
@@ -721,13 +691,8 @@ class PlayerViewModel : ViewModel() {
             )
             return
         }
-        viewModelScope.launch {
-            repo.checkLiked(listOf(songId)).onSuccess { liked ->
-                if (_state.value.currentSong?.id == songId) {
-                    _state.value = _state.value.copy(isLiked = liked[songId.toString()] == true)
-                }
-            }
-        }
+        // P6T2：网易云喜欢状态接口已移除；legacy 条目不显示喜欢态
+        _state.value = _state.value.copy(isLiked = false, isLikeUpdating = false)
     }
 
     private fun isActivePlayRequest(requestToken: Long): Boolean {
@@ -1308,7 +1273,7 @@ class PlayerViewModel : ViewModel() {
         }
     }
 
-    private fun historyCacheKey(): String = "play_history:${session.userId}"
+    private fun historyCacheKey(): String = AppCache.KEY_PLAY_HISTORY_PREFIX + session.userId
 
     fun dismissError(expectedMessage: String) {
         if (_state.value.error == expectedMessage) {

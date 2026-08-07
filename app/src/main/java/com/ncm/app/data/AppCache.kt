@@ -48,5 +48,6 @@ class AppCache(context: Context) {
         const val KEY_QUICK_PREFIX = "quick:"
         const val KEY_PLAYLIST_PREFIX = "playlist:"
         const val KEY_SEARCH_HISTORY_PREFIX = "search_history:"
+        const val KEY_PLAY_HISTORY_PREFIX = "play_history:"
     }
 }

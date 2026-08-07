@@ -150,19 +150,14 @@ object AppPlayer {
     }
 
     private fun playbackHttpClient(): OkHttpClient {
+        // P6T2：网易云 Referer/Cookie 已移除；平台特定请求头由各来源自行携带
         return OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
             .addInterceptor { chain ->
                 val builder = chain.request().newBuilder()
                     .header("User-Agent", PLAYBACK_USER_AGENT)
-                    .header("Referer", "https://music.163.com/")
-                    .header("Origin", "https://music.163.com")
                     .header("Accept", "*/*")
-                val cookie = runCatching { NeteaseApp.instance.session.cookie }.getOrDefault("")
-                if (cookie.isNotBlank()) {
-                    builder.header("Cookie", cookie)
-                }
                 chain.proceed(builder.build())
             }
             .build()

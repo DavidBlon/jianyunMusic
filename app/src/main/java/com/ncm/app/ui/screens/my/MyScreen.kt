@@ -11,9 +11,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.QueueMusic
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Person
@@ -56,14 +58,12 @@ import com.ncm.app.viewmodel.PlayerViewModel
 fun MyScreen(
     onPlaylistClick: (Long) -> Unit,
     onSongClick: (Long) -> Unit,
-    onLogout: () -> Unit,
     onDisclaimerClick: () -> Unit,
     playerViewModel: PlayerViewModel,
     onlineSourceViewModel: OnlineMusicSourceViewModel,
     viewModel: MainViewModel = viewModel()
 ) {
     val state by viewModel.myState.collectAsState()
-    val weeklyRecState by viewModel.weeklyRecState.collectAsState()
     val playerState by playerViewModel.state.collectAsState()
     val accentTheme by NeteaseApp.instance.accentThemeSettings.theme.collectAsState()
     val appearanceSettings = NeteaseApp.instance.playerAppearanceSettings
@@ -96,9 +96,7 @@ fun MyScreen(
     }
 
     LaunchedEffect(Unit) {
-        viewModel.cleanupWeeklyCacheOnPageOpen()
         viewModel.loadMyData()
-        viewModel.loadWeeklyRecommendation()
     }
 
     LazyColumn(
@@ -118,46 +116,21 @@ fun MyScreen(
             )
             Spacer(modifier = Modifier.height(8.dp))
         }
+
+        // P6T3：在线推荐入口已隐藏；这里只保留本地收藏统计（spec §18）
         item {
-            MyPlaylistItem(
-                playlist = weeklyRow(weeklyRecState),
-                onClick = { onPlaylistClick(WEEKLY_PLAYLIST_ID) }
-            )
+            LocalLibraryCard(likedCount = state.likedCount)
             Spacer(modifier = Modifier.height(8.dp))
-        }
-
-        when {
-            state.isLoading -> {
-                item {
-                    Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = Green500, modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
-                    }
-                }
-            }
-
-            state.playlists.isEmpty() -> {
-                item {
-                    Text("暂无歌单", style = MaterialTheme.typography.bodyMedium, color = TextTertiary, modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
-                }
-            }
-
-            else -> {
-                items(state.playlists, key = { it.id }) { playlist ->
-                    MyPlaylistItem(playlist = playlist, onClick = { onPlaylistClick(playlist.id) })
-                }
-            }
         }
 
         item {
             Spacer(modifier = Modifier.height(20.dp))
-            Button(
-                onClick = onLogout,
-                colors = ButtonDefaults.buttonColors(containerColor = GlassSurface),
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp)
-            ) {
-                Text("退出登录", color = TextSecondary)
-            }
+            Text(
+                "在线音乐来源与更多设置见「设置」",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextTertiary,
+                modifier = Modifier.padding(horizontal = 20.dp)
+            )
         }
     }
 
@@ -706,6 +679,33 @@ private fun ProfileHeader(profile: UserProfile?) {
                 Text("VIP 会员", style = MaterialTheme.typography.bodySmall, color = Green500, modifier = Modifier.padding(top = 2.dp))
             }
         }
+    }
+}
+
+@Composable
+private fun LocalLibraryCard(likedCount: Int) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .glassSurface(RoundedCornerShape(18.dp), elevation = 8.dp)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            Icons.Outlined.FavoriteBorder,
+            contentDescription = null,
+            tint = Green500,
+            modifier = Modifier.size(20.dp)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            "本地收藏",
+            style = MaterialTheme.typography.titleMedium,
+            color = TextPrimary,
+            modifier = Modifier.weight(1f)
+        )
+        Text("$likedCount 首", style = MaterialTheme.typography.bodySmall, color = TextTertiary)
     }
 }
 

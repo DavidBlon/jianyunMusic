@@ -8,7 +8,6 @@ import coil.disk.DiskCache
 import com.ncm.app.data.AppCache
 import com.ncm.app.data.MusicSourceSettings
 import com.ncm.app.data.SessionManager
-import com.ncm.app.data.api.NeteaseApi
 import com.ncm.app.data.cache.COVER_IMAGE_CACHE_MAX_BYTES
 import com.ncm.app.data.cache.LinglanAudioCache
 import com.ncm.app.data.cache.coverImageCacheDirectory
@@ -37,9 +36,6 @@ import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
-import okhttp3.logging.HttpLoggingInterceptor
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
 import java.time.ZoneId
 
@@ -47,9 +43,6 @@ import java.time.ZoneId
 val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
 class NeteaseApp : Application(), ImageLoaderFactory {
-
-    lateinit var api: NeteaseApi
-        private set
 
     lateinit var repository: MusicRepository
         private set
@@ -104,7 +97,7 @@ class NeteaseApp : Application(), ImageLoaderFactory {
         cache.removePrefix(AppCache.KEY_QUICK_PREFIX)
         cache.remove(AppCache.KEY_DISCOVER)
         cache.remove(AppCache.KEY_MY)
-        initNetwork()
+        initPluginHost()
         initWeeklyRecommendation()
         applicationScope.launch {
             weeklyCacheCleaner.cleanupOnAppStart(session.userId)
@@ -122,45 +115,8 @@ class NeteaseApp : Application(), ImageLoaderFactory {
             .build()
     }
 
-    private fun initNetwork() {
-        val logging = HttpLoggingInterceptor().apply {
-            level = if (BuildConfig.DEBUG)
-                HttpLoggingInterceptor.Level.BASIC
-            else
-                HttpLoggingInterceptor.Level.NONE
-        }
-
-        val client = OkHttpClient.Builder()
-            .addInterceptor(logging)
-            .addInterceptor { chain ->
-                val request = chain.request().newBuilder()
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                    .header("Referer", "https://music.163.com/")
-                    .apply {
-                        if (session.cookie.isNotBlank()) {
-                            header("Cookie", session.cookie)
-                        }
-                    }
-                    .build()
-                chain.proceed(request)
-            }
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
-            .build()
-
-        val retrofit = Retrofit.Builder()
-            .baseUrl(BuildConfig.API_BASE_URL)
-            .client(client)
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
-
-        api = retrofit.create(NeteaseApi::class.java)
-        initPluginHost()
-    }
-
     /**
-     * 插件宿主组装（阶段 4）：受控 HTTP 桥（SSRF 前置校验；DNS 重绑定防护在阶段 6 的
+     * 插件宿主组装：受控 HTTP 桥（SSRF 前置校验；DNS 重绑定防护在阶段 7 的
      * 自定义 DNS 层补全）+ 播放解析器 + 搜索服务。当前运行时为内存占位，
      * 真实脚本的下载/校验/装载由 PluginRegistry 驱动（阶段 6 接线到设置页选择来源）。
      */
@@ -195,7 +151,7 @@ class NeteaseApp : Application(), ImageLoaderFactory {
         pluginRuntime = InMemoryPluginRuntime(emptyMap())
         playbackResolver = PlaybackResolver(pluginRuntime, SsrfGuard())
         pluginSearchService = PluginSearchService(pluginRuntime) { onlineSourceSettings.currentPluginId }
-        repository = MusicRepository(api, session, linglanAudioCache, musicSourceSettings, pluginSearchService)
+        repository = MusicRepository(pluginSearchService)
     }
 
     private fun initWeeklyRecommendation() {
