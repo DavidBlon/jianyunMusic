@@ -10,6 +10,21 @@ interface MusicProvider {
     suspend fun search(query: String, page: Int, type: String): SearchOutcome
     suspend fun resolveMedia(track: OnlineTrack, quality: String?): ResolvedMedia
     suspend fun lyric(track: OnlineTrack): LyricOutcome
+
+    // ---- 可选能力：默认不支持，UI 靠 supportsXxx 隐藏入口（GC #13，spec §6.2）----
+
+    fun supportsAlbumInfo(): Boolean = false
+    suspend fun albumInfo(track: OnlineTrack, page: Int): List<OnlineTrack> = emptyList()
+
+    fun supportsArtistWorks(): Boolean = false
+    suspend fun artistWorks(artist: Any, page: Int, type: String): List<OnlineTrack> = emptyList()
+
+    fun supportsMusicSheet(): Boolean = false
+    suspend fun musicSheetInfo(sheet: Any, page: Int): List<OnlineTrack> = emptyList()
+
+    fun supportsTopLists(): Boolean = false
+    suspend fun topLists(): List<Any> = emptyList()
+    suspend fun topListDetail(topList: Any): List<OnlineTrack> = emptyList()
 }
 
 data class SearchOutcome(val items: List<OnlineTrack>, val isEnd: Boolean)
