@@ -18,6 +18,7 @@ import com.ncm.app.data.cache.LinglanAudioCache
 import com.ncm.app.data.model.*
 import com.ncm.app.domain.weekly.SimilarSong
 import com.ncm.app.domain.weekly.WeeklyRecommendationSource
+import com.ncm.app.plugin.PluginSearchService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -39,7 +40,8 @@ class MusicRepository(
     private val api: NeteaseApi,
     private val session: SessionManager,
     private val linglanAudioCache: LinglanAudioCache,
-    private val musicSourceSettings: MusicSourceSettings
+    private val musicSourceSettings: MusicSourceSettings,
+    private val pluginSearchService: PluginSearchService? = null
 ) : WeeklyRecommendationSource {
 
     private companion object {
@@ -94,6 +96,13 @@ class MusicRepository(
                 getPlaylistTracks(chartId).getOrNull()?.tracks?.take(5).orEmpty()
             }
         DiscoverHomeResponse(banners = banners, playlists = playlists, dailySongs = dailySongs, newSongs = newSongs)
+    }
+
+    /** 插件来源搜索：委托给当前来源的插件，失败不跨来源兜底（GC #6）。 */
+    suspend fun searchFromPlugin(query: String, page: Int, type: String): Result<com.ncm.app.plugin.provider.SearchOutcome> {
+        val service = pluginSearchService
+            ?: return Result.failure(IllegalStateException("插件搜索服务未配置"))
+        return service.search(query, page, type)
     }
 
     suspend fun search(keywords: String, type: Int = 1, offset: Int = 0): Result<SearchResponse> {
