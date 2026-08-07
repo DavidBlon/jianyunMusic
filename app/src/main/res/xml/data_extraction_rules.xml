@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 31+ 的数据提取规则：密钥密文与个性化插件脚本不进入云备份与设备迁移（spec §8.2，GC #8）。 -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="vault_"/>
+        <exclude domain="file" path="plugins/"/>
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="vault_"/>
+        <exclude domain="file" path="plugins/"/>
+    </device-transfer>
+</data-extraction-rules>

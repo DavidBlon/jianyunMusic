@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 30 及以下的全量备份规则：排除密钥密文与个性化插件脚本（spec §8.2，GC #8）。 -->
+<full-backup-content>
+    <exclude domain="file" path="vault_"/>
+    <exclude domain="file" path="plugins/"/>
+</full-backup-content>
