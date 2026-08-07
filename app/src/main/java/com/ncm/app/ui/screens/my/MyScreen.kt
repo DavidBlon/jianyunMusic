@@ -411,8 +411,8 @@ private fun LinglanCacheSetting(
                 }
             }
             Text(
-                "仅缓存聆澜音频（上限 $LINGLAN_AUDIO_CACHE_MAX_MIB MB，系统空间不足时可能自动清理）；" +
-                    "网易云与酷狗始终直连，不写入缓存。",
+                "仅缓存已授权的在线音源音频（上限 $LINGLAN_AUDIO_CACHE_MAX_MIB MB，系统空间不足时可能自动清理）；" +
+                    "本地与简云官方内容始终直连，不写入缓存。",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextTertiary,
                 modifier = Modifier.padding(top = 8.dp)
@@ -674,7 +674,7 @@ private fun ProfileHeader(profile: UserProfile?) {
         }
         Spacer(modifier = Modifier.width(14.dp))
         Column {
-            Text(profile?.nickname ?: "网易云用户", style = MaterialTheme.typography.headlineSmall, color = TextPrimary, fontWeight = FontWeight.SemiBold)
+            Text(profile?.nickname ?: "本地用户", style = MaterialTheme.typography.headlineSmall, color = TextPrimary, fontWeight = FontWeight.SemiBold)
             if ((profile?.vipType ?: 0) > 0) {
                 Text("VIP 会员", style = MaterialTheme.typography.bodySmall, color = Green500, modifier = Modifier.padding(top = 2.dp))
             }

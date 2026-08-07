@@ -47,7 +47,7 @@ class LinglanCachePolicyTest {
     fun `prefetch accepts direct playable sources but not paid cache sources`() {
         assertTrue(LinglanCachePolicy.isAllowedForPrefetch(PlaybackSource.NETEASE))
         assertTrue(LinglanCachePolicy.isAllowedForPrefetch(PlaybackSource.KUGOU))
-        assertTrue(LinglanCachePolicy.isAllowedForPrefetch(PlaybackSource.JIANYUN_OFFICIAL))
+        assertTrue(LinglanCachePolicy.isAllowedForPrefetch(PlaybackSource.OFFICIAL))
         assertFalse(LinglanCachePolicy.isAllowedForPrefetch(PlaybackSource.LINGLAN))
         assertFalse(LinglanCachePolicy.isAllowedForPrefetch(PlaybackSource.LINGLAN_CACHE))
     }

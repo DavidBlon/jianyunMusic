@@ -362,7 +362,7 @@ private fun PlaylistHeader(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "网易云音乐 · $count 首歌",
+                text = "$count 首歌",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color(0xB3FFFFFF),
                 modifier = Modifier.padding(top = 8.dp)

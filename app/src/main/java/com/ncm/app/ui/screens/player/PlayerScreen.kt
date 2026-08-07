@@ -433,7 +433,7 @@ private fun AudioSourceTag(source: String) {
 
     val label = when (source) {
         PlaybackSource.KUGOU -> "酷狗"
-        PlaybackSource.JIANYUN_OFFICIAL -> "简云官方"
+        PlaybackSource.OFFICIAL -> "简云官方"
         else -> null
     } ?: return
 

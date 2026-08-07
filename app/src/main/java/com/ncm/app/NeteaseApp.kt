@@ -42,6 +42,9 @@ import java.time.ZoneId
 /** App 级协程作用域：周推荐生成/清理等后台任务用它，避免被调用方取消连带。 */
 val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+/** 中性应用入口别名（P6T4）：旧类名保留到功能稳定后的包名/工程名迁移（spec §13）。 */
+typealias JianyunApp = NeteaseApp
+
 class NeteaseApp : Application(), ImageLoaderFactory {
 
     lateinit var repository: MusicRepository

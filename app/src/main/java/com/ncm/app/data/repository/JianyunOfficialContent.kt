@@ -152,7 +152,7 @@ object JianyunOfficialContent {
 
     fun songUrlResponse(song: Song, bitrate: Int): SongUrlResponse = SongUrlResponse(
         url = songUrlFor(song),
-        source = PlaybackSource.JIANYUN_OFFICIAL,
+        source = PlaybackSource.OFFICIAL,
         br = bitrate,
         size = if (song.id == SONG_ID) SONG_SIZE_BYTES else 0L,
         type = "mp3",
