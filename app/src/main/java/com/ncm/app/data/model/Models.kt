@@ -46,7 +46,8 @@ data class Song(
     val dt: Long = 0,
     val fee: Int = 0,
     val mv: Long = 0,
-    val pop: Int = 0
+    val pop: Int = 0,
+    val mediaFileName: String? = null
 ) {
     val artistText: String
         get() = artists?.joinToString(" / ") { it.name } ?: "未知"

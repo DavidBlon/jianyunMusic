@@ -43,17 +43,17 @@ class JianyunOfficialContentTest {
     @Test
     fun `catalog maps every root mp3 to the official artist and shared cover`() {
         val songs = JianyunOfficialContent.parseCatalog(
-            """{"songs":[{"file":"简云漫游.mp3","name":"简云漫游","durationMs":109000},{"file":"云端相遇.mp3","name":"云端相遇","durationMs":0}]}"""
+            """{"songs":[{"file":"简云漫游.mp3","name":"简云漫游","durationMs":109000},{"file":"简云漫游2.mp3","name":"简云漫游2","durationMs":0},{"file":"云端相遇.mp3","name":"云端相遇","durationMs":0},{"file":"云端相遇.MP3","name":"云端相遇","durationMs":0},{"file":"cover.png","name":"cover","durationMs":0}]}"""
         )
 
-        assertEquals(listOf("简云漫游", "云端相遇"), songs.map(Song::name))
-        assertEquals(2, songs.map(Song::id).distinct().size)
+        assertEquals(listOf("简云漫游", "简云漫游2", "云端相遇", "云端相遇"), songs.map(Song::name))
+        assertEquals(4, songs.map(Song::id).distinct().size)
         assertTrue(songs.all { it.artists?.single()?.name == "简云官方" })
         assertTrue(songs.all { it.album?.picUrl == JianyunOfficialContent.albumCoverUrl })
         assertTrue(songs.all { JianyunOfficialContent.isOfficialSongId(it.id) })
         assertTrue(
             JianyunOfficialContent.songUrlFor(songs.last())
-                .endsWith("/%E4%BA%91%E7%AB%AF%E7%9B%B8%E9%81%87.mp3")
+                .endsWith("/%E4%BA%91%E7%AB%AF%E7%9B%B8%E9%81%87.MP3")
         )
     }
 }

@@ -2,10 +2,32 @@
 declare(strict_types=1);
 
 header('Content-Type: application/json; charset=utf-8');
-header('Cache-Control: no-cache, must-revalidate');
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
 
-$files = glob(__DIR__ . DIRECTORY_SEPARATOR . '*.mp3') ?: [];
-natcasesort($files);
+$files = [];
+$directory = new FilesystemIterator(__DIR__, FilesystemIterator::SKIP_DOTS);
+foreach ($directory as $entry) {
+    $fileName = $entry->getFilename();
+    if (
+        !$entry->isFile() ||
+        !$entry->isReadable() ||
+        preg_match('/\.mp3\z/i', $fileName) !== 1
+    ) {
+        continue;
+    }
+
+    $files[] = $entry->getPathname();
+}
+usort(
+    $files,
+    static function (string $left, string $right): int {
+        $caseInsensitive = strnatcasecmp(basename($left), basename($right));
+        return $caseInsensitive !== 0
+            ? $caseInsensitive
+            : strnatcmp(basename($left), basename($right));
+    }
+);
 
 $songs = [];
 foreach ($files as $path) {

@@ -441,6 +441,7 @@ class MusicRepository(
                     .url(JianyunOfficialContent.catalogUrl)
                     .get()
                     .header("Accept", "application/json")
+                    .header("Cache-Control", "no-cache")
                     .header("User-Agent", PLAYBACK_USER_AGENT)
                     .build()
                 qrHttp.newCall(request).execute().use { response ->

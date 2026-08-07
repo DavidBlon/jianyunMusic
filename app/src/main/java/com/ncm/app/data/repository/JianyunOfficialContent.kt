@@ -68,7 +68,8 @@ object JianyunOfficialContent {
             ),
             dt = durationMs.coerceAtLeast(0L),
             fee = 0,
-            pop = 100
+            pop = 100,
+            mediaFileName = fileName
         )
     }
 
@@ -143,7 +144,11 @@ object JianyunOfficialContent {
             .distinctBy(Song::id)
     }
 
-    fun songUrlFor(song: Song): String = songUrlForFile("${song.name}.mp3")
+    fun songUrlFor(song: Song): String = songUrlForFile(
+        song.mediaFileName
+            ?.takeIf { it.endsWith(".mp3", ignoreCase = true) }
+            ?: "${song.name}.mp3"
+    )
 
     fun songUrlResponse(song: Song, bitrate: Int): SongUrlResponse = SongUrlResponse(
         url = songUrlFor(song),
@@ -159,7 +164,7 @@ object JianyunOfficialContent {
     private fun songIdForFile(fileName: String): Long {
         if (fileName == DEFAULT_FILE_NAME) return SONG_ID
         val checksum = CRC32().apply {
-            update(fileName.lowercase().toByteArray(StandardCharsets.UTF_8))
+            update(fileName.toByteArray(StandardCharsets.UTF_8))
         }.value
         return DYNAMIC_SONG_ID_BASE + checksum
     }
