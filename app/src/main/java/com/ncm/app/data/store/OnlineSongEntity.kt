@@ -1,6 +1,5 @@
 package com.ncm.app.data.store
 
-import androidx.room.Dao
 import androidx.room.Entity
 import androidx.room.Index
 
@@ -23,7 +22,3 @@ data class OnlineSongEntity(
 ) {
     fun asCompositeKey(): String = "$pluginId#$remoteId"
 }
-
-/** 在线歌曲 CRUD 与迁移工具查询占位，阶段 5 填充（spec §12）。 */
-@Dao
-interface OnlineSongDao
