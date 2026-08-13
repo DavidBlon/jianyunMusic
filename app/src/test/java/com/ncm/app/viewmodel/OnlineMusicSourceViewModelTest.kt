@@ -1,9 +1,15 @@
 package com.ncm.app.viewmodel
 
 import com.ncm.app.plugin.auth.LinglanAuthState
+import com.ncm.app.data.repository.MusicSourceKeyValidationResult
+import com.ncm.app.plugin.manifest.ManifestItem
+import com.ncm.app.plugin.model.PluginCategory
+import com.ncm.app.plugin.model.PluginReleaseStatus
 import com.ncm.app.plugin.runtime.InMemoryPluginRuntime
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -29,13 +35,13 @@ class OnlineMusicSourceViewModelTest {
         )
         vm.refreshManifest()
         dispatcher.scheduler.advanceUntilIdle()
-        assertEquals(3, vm.uiState.value.manifestItems.size)
+        assertEquals(2, vm.uiState.value.manifestItems.size)
         vm.selectSource("linglan.kw")
         dispatcher.scheduler.advanceUntilIdle()
         assertEquals("linglan.kw", vm.uiState.value.selectedPluginId)
-        vm.selectSource("linglan.wy")
+        vm.selectSource("linglan.tx")
         dispatcher.scheduler.advanceUntilIdle()
-        assertEquals("linglan.wy", vm.uiState.value.selectedPluginId)
+        assertEquals("linglan.tx", vm.uiState.value.selectedPluginId)
     }
 
     @Test
@@ -51,7 +57,54 @@ class OnlineMusicSourceViewModelTest {
         vm.connect("valid-secret-1234")
         dispatcher.scheduler.advanceUntilIdle()
         assertEquals(LinglanAuthState.ACTIVE, vm.uiState.value.authState)
-        assertEquals(3, vm.uiState.value.manifestItems.size) // 验证成功后自动拉取清单
+        assertEquals(2, vm.uiState.value.manifestItems.size) // 验证成功后自动拉取清单
+    }
+
+    @Test
+    fun quickPasteValidationReportsInvalidThenAllowsRetryWithCorrectKey() = runTest(dispatcher) {
+        val vm = OnlineMusicSourceViewModel(
+            manifestProvider = { sampleManifest() },
+            runtime = InMemoryPluginRuntime(emptyMap()),
+            authClient = com.ncm.app.plugin.manifest.LinglanAuthClient(
+                http = { _, secret ->
+                    if (secret == "correct-key-1234") {
+                        """{"code":200,"expireAt":9999999999999}"""
+                    } else {
+                        """{"code":401,"message":"密钥错误，请重新输入"}"""
+                    }
+                }
+            )
+        )
+
+        val invalid = vm.validateAndConnect("wrong-key-1234")
+        val valid = vm.validateAndConnect("correct-key-1234")
+
+        assertEquals(true, invalid is MusicSourceKeyValidationResult.Invalid)
+        assertEquals(MusicSourceKeyValidationResult.Valid, valid)
+        assertEquals(LinglanAuthState.ACTIVE, vm.uiState.value.authState)
+    }
+
+    @Test
+    fun cancellingValidationCannotLaterOverwriteDisconnectedState() = runTest(dispatcher) {
+        val started = CompletableDeferred<Unit>()
+        val vm = OnlineMusicSourceViewModel(
+            manifestProvider = { sampleManifest() },
+            runtime = InMemoryPluginRuntime(emptyMap()),
+            authClient = com.ncm.app.plugin.manifest.LinglanAuthClient(
+                http = { _, _ ->
+                    started.complete(Unit)
+                    awaitCancellation()
+                }
+            )
+        )
+
+        vm.connect("valid-secret-1234")
+        dispatcher.scheduler.runCurrent()
+        started.await()
+        vm.cancelConnect()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(LinglanAuthState.DISCONNECTED, vm.uiState.value.authState)
     }
 
     @Test
@@ -85,7 +138,8 @@ class OnlineMusicSourceViewModelTest {
         val vm = OnlineMusicSourceViewModel(
             manifestProvider = { sampleManifest() },
             runtime = InMemoryPluginRuntime(emptyMap()),
-            registry = registry
+            registry = registry,
+            ioDispatcher = dispatcher
         )
         vm.refreshManifest()
         dispatcher.scheduler.advanceUntilIdle()
@@ -146,7 +200,8 @@ class OnlineMusicSourceViewModelTest {
         val vm = OnlineMusicSourceViewModel(
             manifestProvider = { listOf(signedItem) },
             runtime = runtime,
-            registry = registry
+            registry = registry,
+            ioDispatcher = dispatcher
         )
         vm.refreshManifest()
         dispatcher.scheduler.advanceUntilIdle()
@@ -154,4 +209,57 @@ class OnlineMusicSourceViewModelTest {
         dispatcher.scheduler.advanceUntilIdle()
         assertEquals("linglan.kw", vm.uiState.value.selectedPluginId)
     }
+
+    @Test
+    fun switchingSourceKeepsPreviousProviderForFavoritesAndHistoryPlayback() = runTest(dispatcher) {
+        val registry = com.ncm.app.plugin.registry.PluginRegistry(
+            runtimeFactory = { pluginId, _, _ ->
+                InMemoryPluginRuntime(mapOf(pluginId to SourceTestProvider(pluginId)))
+            },
+            downloader = { "cached-script".toByteArray() },
+            verifier = com.ncm.app.plugin.security.ManifestSignatureVerifier(trustRootB64 = "", now = { 0L }),
+            cache = com.ncm.app.plugin.runtime.PluginScriptCache(
+                java.nio.file.Files.createTempDirectory("vm-retained-sources").toFile(),
+                identityDigest = "u"
+            ),
+            requireSignedManifest = false
+        )
+        val vm = OnlineMusicSourceViewModel(
+            manifestProvider = { sampleManifest() },
+            runtime = com.ncm.app.plugin.registry.RegistryPluginRuntime(registry),
+            registry = registry,
+            ioDispatcher = dispatcher
+        )
+
+        vm.refreshManifest()
+        dispatcher.scheduler.advanceUntilIdle()
+        vm.selectSource("linglan.kw")
+        dispatcher.scheduler.advanceUntilIdle()
+        vm.selectSource("linglan.tx")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals("linglan.tx", vm.uiState.value.selectedPluginId)
+        assertEquals(true, registry.currentProvider("linglan.kw") != null)
+        assertEquals(true, registry.currentProvider("linglan.tx") != null)
+    }
 }
+
+private class SourceTestProvider(
+    override val pluginId: String
+) : com.ncm.app.plugin.provider.MusicProvider {
+    override suspend fun search(query: String, page: Int, type: String) =
+        com.ncm.app.plugin.provider.SearchOutcome(emptyList(), isEnd = true)
+
+    override suspend fun resolveMedia(
+        track: com.ncm.app.plugin.model.OnlineTrack,
+        quality: String?
+    ): com.ncm.app.plugin.model.ResolvedMedia = error("not used")
+
+    override suspend fun lyric(track: com.ncm.app.plugin.model.OnlineTrack) =
+        com.ncm.app.plugin.provider.LyricOutcome(null, null, null, null)
+}
+
+private suspend fun sampleManifest(): List<ManifestItem> = listOf(
+    ManifestItem("linglan.kw", "Source KW", "1.0.0", "https://provider.example/kw/v1.js", PluginCategory.MUSIC, 1, null, PluginReleaseStatus.ACTIVE, null),
+    ManifestItem("linglan.tx", "Source TX", "1.0.0", "https://provider.example/tx/v1.js", PluginCategory.MUSIC, 1, null, PluginReleaseStatus.ACTIVE, null)
+)

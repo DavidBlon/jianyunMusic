@@ -27,6 +27,18 @@ class PluginScriptCache(
         .maxByOrNull { it.lastModified() }
         ?.let(::readScript)
 
+    fun activePluginIds(): List<String> {
+        val prefix = "${identityDigest}_"
+        return dir.listFiles { file ->
+            file.name.startsWith(prefix) && file.name.endsWith(SUFFIX_ACTIVE)
+        }
+            .orEmpty()
+            .mapNotNull { file ->
+                file.name.removePrefix(prefix).substringBefore('_').takeIf { it.isNotBlank() }
+            }
+            .distinct()
+    }
+
     fun stageCandidate(pluginId: String, version: String, script: String): CachedScript {
         val key = cacheKeyFor(pluginId, version)
         val file = File(dir, "$key$SUFFIX_CANDIDATE")
@@ -35,10 +47,10 @@ class PluginScriptCache(
     }
 
     fun activateCandidate(pluginId: String, version: String): CachedScript? {
-        val candidate = listFiles(pluginId).firstOrNull { it.name.endsWith(SUFFIX_CANDIDATE) }
+        val key = cacheKeyFor(pluginId, version)
+        val candidate = File(dir, "$key$SUFFIX_CANDIDATE").takeIf { it.isFile }
             ?: return null
         val active = readScript(candidate)
-        val key = cacheKeyFor(pluginId, version)
         File(dir, "$key$SUFFIX_ACTIVE").writeText(active.script)
         candidate.delete()
         return active

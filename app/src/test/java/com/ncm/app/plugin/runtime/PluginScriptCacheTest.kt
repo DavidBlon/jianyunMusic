@@ -35,6 +35,18 @@ class PluginScriptCacheTest {
     }
 
     @Test
+    fun activationSelectsTheRequestedCandidateWhenAStaleCandidateExists() {
+        val cache = PluginScriptCache(tmpDir(), identityDigest = "u")
+        cache.stageCandidate("kw", "1.0.0", "stale-script")
+        cache.stageCandidate("kw", "1.1.0", "new-script")
+
+        val active = cache.activateCandidate("kw", "1.1.0")
+
+        assertEquals("new-script", active?.script)
+        assertEquals("new-script", cache.loadActive("kw")?.script)
+    }
+
+    @Test
     fun cacheKeyNeverContainsRawSecret() {
         // 键 = 授权身份的不可逆摘要 + pluginId + version；原始密钥绝不进入路径/文件名（GC #10）
         val cache = PluginScriptCache(tmpDir(), identityDigest = "user-hash-abc")

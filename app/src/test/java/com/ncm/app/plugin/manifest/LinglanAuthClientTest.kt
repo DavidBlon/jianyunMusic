@@ -37,4 +37,35 @@ class LinglanAuthClientTest {
         val client = LinglanAuthClient(http = { _, _ -> "not-json-at-all" })
         assertEquals(LinglanAuthState.ERROR, client.validate("key").state)
     }
+
+    @Test
+    fun scriptUpdateResponseCannotAuthorizeAnArbitraryKey() = runTest {
+        val client = LinglanAuthClient(
+            http = { _, _ -> """{"code":200,"currentkey":"script-version","data":null}""" }
+        )
+
+        assertEquals(LinglanAuthState.ERROR, client.validate("arbitrary-long-text").state)
+    }
+
+    @Test
+    fun missingSongParametersAfterAuthenticationMapsToActive() = runTest {
+        val client = LinglanAuthClient(
+            http = { _, _ -> """{"code":400,"message":"缺少歌曲参数"}""" }
+        )
+
+        assertEquals(LinglanAuthState.ACTIVE, client.validate("valid-key-123").state)
+    }
+
+    @Test
+    fun requestUrlNeverExposesCredential() {
+        val client = LinglanAuthClient(
+            endpoint = "https://example.test/music/url",
+            http = { _, _ -> "{\"code\":200}" }
+        )
+        assertEquals(
+            "https://example.test/music/url",
+            client.requestUrl()
+        )
+    }
+
 }

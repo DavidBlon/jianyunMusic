@@ -40,6 +40,23 @@ class PluginRegistryTest {
     }
 
     @Test
+    fun runtimeCreationFailureIsReturnedInsteadOfEscapingInstall() = runTest {
+        val script = "module.exports = { platform: 'kw', version: '1.0.0' };"
+        val registry = PluginRegistry(
+            runtimeFactory = { _, _, _ -> throw IllegalStateException("QuickJS initialization failed") },
+            downloader = { script.toByteArray() },
+            verifier = ManifestSignatureVerifier(trustRootB64 = "", now = { 0L }),
+            cache = cache(),
+            requireSignedManifest = false
+        )
+
+        val result = registry.install(item(sha256 = ManifestSignatureVerifier.sha256Hex(script)))
+
+        assertTrue(result.isFailure)
+        assertEquals("QuickJS initialization failed", result.exceptionOrNull()?.message)
+    }
+
+    @Test
     fun revokedPluginCannotBeInstalled() = runTest {
         val kp = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
         val pubB64 = java.util.Base64.getEncoder().encodeToString(kp.public.encoded)
@@ -131,6 +148,53 @@ class PluginRegistryTest {
         val result = registry.install(item(id = "linglan.kw", sha256 = hash))
         assertTrue(result.isSuccess)
         assertTrue(registry.currentProvider("linglan.kw") != null)
+    }
+
+    @Test
+    fun restoresPreviouslyActivatedScriptWithoutDownloading() {
+        val scriptCache = cache()
+        scriptCache.stageCandidate("linglan.kg", "7", "cached-script")
+        scriptCache.activateCandidate("linglan.kg", "7")
+        val provider = FakeProvider("linglan.kg")
+        val registry = PluginRegistry(
+            runtimeFactory = { pluginId, script, _ ->
+                assertEquals("linglan.kg", pluginId)
+                assertEquals("cached-script", script)
+                InMemoryPluginRuntime(mapOf(pluginId to provider))
+            },
+            downloader = { error("restore must not use the network") },
+            verifier = ManifestSignatureVerifier(trustRootB64 = "", now = { 0L }),
+            cache = scriptCache,
+            requireSignedManifest = false
+        )
+
+        val result = registry.restore("linglan.kg")
+
+        assertTrue(result.isSuccess)
+        assertEquals("linglan.kg", result.getOrThrow().pluginId)
+        assertTrue(registry.currentProvider("linglan.kg") != null)
+    }
+
+    @Test
+    fun availableProvidersRestoresEveryCachedSourceForMixedPlaylists() {
+        val scriptCache = cache()
+        listOf("linglan.kg", "linglan.tx").forEach { pluginId ->
+            scriptCache.stageCandidate(pluginId, "7", "script-$pluginId")
+            scriptCache.activateCandidate(pluginId, "7")
+        }
+        val registry = PluginRegistry(
+            runtimeFactory = { pluginId, _, _ ->
+                InMemoryPluginRuntime(mapOf(pluginId to FakeProvider(pluginId)))
+            },
+            downloader = { error("cached providers must not download") },
+            verifier = ManifestSignatureVerifier(trustRootB64 = "", now = { 0L }),
+            cache = scriptCache,
+            requireSignedManifest = false
+        )
+
+        val restoredIds = registry.availableProviders().map { it.pluginId }.toSet()
+
+        assertEquals(setOf("linglan.kg", "linglan.tx"), restoredIds)
     }
 
     @Test

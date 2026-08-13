@@ -78,17 +78,19 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.ncm.app.ui.components.FirstUseMusicSourcePrompt
 import com.ncm.app.ui.navigation.NavGraph
+import com.ncm.app.ui.navigation.createOnlineMusicSourceViewModel
 import com.ncm.app.ui.navigation.Routes
 import com.ncm.app.ui.navigation.KeyboardDismissalTarget
 import com.ncm.app.ui.navigation.shouldDismissKeyboardForTransition
-import com.ncm.app.ui.components.FirstUseMusicSourcePrompt
 import com.ncm.app.ui.screens.player.PlayerScreen
 import com.ncm.app.ui.theme.*
 import com.ncm.app.util.albumArtworkThumbnailCacheKey
 import com.ncm.app.util.albumArtworkThumbnailUrl
 import com.ncm.app.util.albumArtworkDisplayScale
 import com.ncm.app.viewmodel.MainViewModel
+import com.ncm.app.viewmodel.OnlineMusicSourceViewModel
 import com.ncm.app.viewmodel.PlayerViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
@@ -106,6 +108,16 @@ internal fun retainBottomNavRoute(
     Routes.DISCOVER, Routes.SEARCH, Routes.MY -> currentRoute
     else -> selectedRoute
 }
+
+internal fun shouldShowFirstUseMusicSourcePrompt(
+    promptCompleted: Boolean,
+    hasStoredKey: Boolean,
+    hasSelectedSource: Boolean,
+    dismissedThisSession: Boolean
+): Boolean = !dismissedThisSession && (
+    (!hasStoredKey && !promptCompleted) ||
+        (hasStoredKey && !hasSelectedSource)
+    )
 
 class MainActivity : ComponentActivity() {
     private val notificationPermissionLauncher =
@@ -147,13 +159,17 @@ fun MainApp() {
     val navController = rememberNavController()
     val mainViewModel: MainViewModel = viewModel()
     val playerViewModel: PlayerViewModel = viewModel()
+    val appContext = LocalContext.current.applicationContext
+    val onlineSourceViewModel = viewModel<OnlineMusicSourceViewModel> {
+        createOnlineMusicSourceViewModel(appContext)
+    }
     val playerState by playerViewModel.state.collectAsState()
-    val appState by mainViewModel.appState.collectAsState()
+    val onlineSourceState by onlineSourceViewModel.uiState.collectAsState()
     val appearanceSettings = NeteaseApp.instance.playerAppearanceSettings
     val musicSourceSettings = NeteaseApp.instance.musicSourceSettings
     val customBackground by appearanceSettings.customBackground.collectAsState()
     val applyCustomBackgroundGlobally by appearanceSettings.applyCustomBackgroundGlobally.collectAsState()
-    val musicSourceKey by musicSourceSettings.cardKey.collectAsState()
+    val legacyMusicSourceKey by musicSourceSettings.cardKey.collectAsState()
     val firstUsePromptCompleted by musicSourceSettings.firstUsePromptCompleted.collectAsState()
     val useGlobalCustomBackground = applyCustomBackgroundGlobally && customBackground != null
 
@@ -169,6 +185,23 @@ fun MainApp() {
     var playerOverlaySongId by rememberSaveable { mutableStateOf<Long?>(null) }
     var firstUsePromptDismissed by rememberSaveable { mutableStateOf(false) }
     var retainedPlayerSongId by remember { mutableStateOf<Long?>(null) }
+
+    val hasStoredMusicSourceKey = onlineSourceState.maskedSecret != null ||
+        legacyMusicSourceKey.isNotBlank()
+    val hasSelectedMusicSource = onlineSourceState.selectedPluginId != null ||
+        NeteaseApp.instance.onlineSourceSettings.currentPluginId != null
+    val showFirstUsePrompt = shouldShowFirstUseMusicSourcePrompt(
+        promptCompleted = firstUsePromptCompleted,
+        hasStoredKey = hasStoredMusicSourceKey,
+        hasSelectedSource = hasSelectedMusicSource,
+        dismissedThisSession = firstUsePromptDismissed
+    )
+
+    LaunchedEffect(hasStoredMusicSourceKey, hasSelectedMusicSource, firstUsePromptCompleted) {
+        if (hasStoredMusicSourceKey && hasSelectedMusicSource && !firstUsePromptCompleted) {
+            musicSourceSettings.completeFirstUsePrompt()
+        }
+    }
 
     val activePlayerSongId = playerOverlaySongId ?: routedPlayerSongId
     val showBottomBar = true
@@ -209,9 +242,6 @@ fun MainApp() {
             miniPlayerBlocked = false
         }
     }
-
-    val context = LocalContext.current
-    // P6T2：网易云登录已移除，不再存在登出跳转
 
     val onBottomNavigate: (String) -> Unit = remember(navController) {
         { route ->
@@ -285,8 +315,9 @@ fun MainApp() {
                         onOpenPlayer = onOpenPlayer,
                         onOpenPluginTrack = { track ->
                             // 插件轨道播放：直接经 PlaybackResolver 解析入队（spec §4）
-                            playerViewModel.playPluginTrack(track)
+                            onOpenPlayer(playerViewModel.playPluginTrack(track))
                         },
+                        onlineSourceViewModel = onlineSourceViewModel,
                         modifier = Modifier.fillMaxSize()
                     )
 
@@ -352,21 +383,22 @@ fun MainApp() {
             }
         }
 
-        if (!firstUsePromptCompleted && !firstUsePromptDismissed) {
+        if (showFirstUsePrompt) {
             FirstUseMusicSourcePrompt(
-                currentMaskedKey = musicSourceKey
-                    .takeIf { it.isNotBlank() }
-                    ?.let { "••••${it.takeLast(4)}" },
+                currentMaskedKey = onlineSourceState.maskedSecret,
+                manifestItems = onlineSourceState.manifestItems,
+                selectedPluginId = onlineSourceState.selectedPluginId,
+                isRefreshingSources = onlineSourceState.isRefreshing,
+                isDownloadingSource = onlineSourceState.isDownloading,
+                sourceError = onlineSourceState.error,
+                onSelectSource = onlineSourceViewModel::selectSource,
                 onClose = { doNotShowAgain ->
-                    if (doNotShowAgain) {
-                        mainViewModel.skipFirstUseMusicSourcePrompt()
-                    }
+                    if (doNotShowAgain) musicSourceSettings.completeFirstUsePrompt()
                     firstUsePromptDismissed = true
                 },
-                onValidateAndSave = mainViewModel::validateAndSaveMusicSourceKey
+                onValidateAndSave = onlineSourceViewModel::validateAndConnect
             )
-        }
-        if (firstUsePromptCompleted || firstUsePromptDismissed) {
+        } else {
             AppUpdatePrompt()
         }
         OpeningSplash()

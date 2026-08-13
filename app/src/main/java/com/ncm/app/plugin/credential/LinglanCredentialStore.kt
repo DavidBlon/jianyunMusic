@@ -73,7 +73,7 @@ class KeystoreSecretVault(
 class LinglanCredentialStore(private val vault: SecretVault) {
     fun save(secret: String): Boolean {
         val normalized = secret.trim()
-        if (normalized.length < 8) return false
+        if (!isValidMusicSourceKey(normalized)) return false
         return vault.write(normalized)
     }
     fun read(): String? = vault.read()

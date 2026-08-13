@@ -1,16 +1,12 @@
 package com.ncm.app.ui.screens.discover
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.outlined.Favorite
-import androidx.compose.material.icons.outlined.History
-import androidx.compose.material.icons.outlined.Person
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -19,30 +15,29 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
-import com.ncm.app.data.model.Song
-import com.ncm.app.data.model.UserProfile
+import com.ncm.app.plugin.model.OnlineTrack
 import com.ncm.app.ui.theme.*
 import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
+import com.ncm.app.viewmodel.RecommendedPlaylistUi
 
 /**
- * 本地首页（P6T3，spec §18）：不再展示依赖网易云相似歌曲/推荐歌单的在线推荐，
- * 只保留本地最近播放、本地收藏与简云官方内容。
+ * 发现页沿用旧版网易云式的推荐卡片层级，内容统一来自用户当前选择的在线音源。
  */
 @Composable
 fun DiscoverScreen(
     onPlaylistClick: (Long) -> Unit,
-    onSongClick: (Long) -> Unit,
-    onSearchClick: () -> Unit,
+    onPluginSongClick: (OnlineTrack) -> Unit,
     viewModel: MainViewModel = viewModel()
 ) {
     val state by viewModel.discoverState.collectAsState()
-    val profile = viewModel.currentProfile()
 
     LaunchedEffect(Unit) {
         viewModel.loadDiscover()
@@ -54,175 +49,200 @@ fun DiscoverScreen(
             .statusBarsPadding(),
         contentPadding = PaddingValues(bottom = miniPlayerSafeBottomPadding())
     ) {
-        item { Header(profile = profile) }
-        item { SearchBar(onClick = onSearchClick) }
-        item { LocalStats(likedCount = state.likedCount) }
-        item { RecentSongs(state.recentSongs, onSongClick) }
-        item { OfficialSongs(state.officialSongs, onSongClick) }
-    }
-}
-
-@Composable
-private fun Header(profile: UserProfile?) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 20.dp, end = 20.dp, top = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier
-                .size(38.dp)
-                .glassSurface(CircleShape, elevation = 8.dp)
-                .padding(2.dp)
-                .clip(CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            if (!profile?.avatar.isNullOrBlank()) {
-                AsyncImage(
-                    sizedImageUrl(profile?.avatar, 120),
-                    contentDescription = "用户头像",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
-            } else {
-                Icon(
-                    androidx.compose.material.icons.Icons.Outlined.Person,
-                    contentDescription = "用户",
-                    tint = TextPrimary,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-        }
-        Spacer(modifier = Modifier.width(10.dp))
-        Column {
-            Text(
-                text = "发现",
-                style = MaterialTheme.typography.headlineLarge,
-                color = TextPrimary
+        item { Header() }
+        item {
+            RecommendedPlaylists(
+                playlists = state.recommendedPlaylists,
+                sourceLabel = state.recommendationSourceLabel,
+                isLoading = state.isLoading,
+                error = state.recommendationError,
+                onClick = onPlaylistClick
             )
-            Text(
-                text = "本地音乐 · 在线来源见设置",
-                style = MaterialTheme.typography.labelSmall,
-                color = TextTertiary
+        }
+        item {
+            RecommendedSongs(
+                songs = state.recommendedSongs,
+                sourceLabel = state.recommendationSourceLabel,
+                isLoading = state.isLoading,
+                error = state.songRecommendationError,
+                onClick = onPluginSongClick
             )
         }
     }
 }
 
 @Composable
-private fun SearchBar(onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 20.dp, end = 20.dp, top = 12.dp)
-            .glassSurface(RoundedCornerShape(12.dp), elevation = 8.dp)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            androidx.compose.material.icons.Icons.Outlined.Search,
-            contentDescription = null,
-            tint = TextSecondary,
-            modifier = Modifier.size(18.dp)
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text("搜索歌曲、歌手、专辑", style = MaterialTheme.typography.bodyMedium, color = TextTertiary)
-    }
-}
-
-@Composable
-private fun LocalStats(likedCount: Int) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 20.dp, end = 20.dp, top = 18.dp)
-            .glassSurface(RoundedCornerShape(16.dp), elevation = 8.dp)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            androidx.compose.material.icons.Icons.Outlined.Favorite,
-            contentDescription = null,
-            tint = Green500,
-            modifier = Modifier.size(20.dp)
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text("本地收藏 $likedCount 首", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
-    }
-}
-
-@Composable
-private fun RecentSongs(songs: List<Song>, onClick: (Long) -> Unit) {
-    SectionHeader("最近播放")
-    if (songs.isEmpty()) {
-        Text(
-            "暂无播放记录",
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextTertiary,
-            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp)
-        )
-        return
-    }
-    LazyRow(
-        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
-        contentPadding = PaddingValues(horizontal = 20.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        items(songs.take(12), key = { it.id }) { song ->
-            SongCard(song, onClick = { onClick(song.id) })
-        }
-    }
-}
-
-@Composable
-private fun OfficialSongs(songs: List<Song>, onClick: (Long) -> Unit) {
-    SectionHeader("简云官方歌曲")
-    if (songs.isEmpty()) {
-        Text(
-            "简云官方目录暂不可用",
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextTertiary,
-            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp)
-        )
-        return
-    }
-    LazyRow(
-        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
-        contentPadding = PaddingValues(horizontal = 20.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        items(songs.take(12), key = { it.id }) { song ->
-            SongCard(song, onClick = { onClick(song.id) })
-        }
-    }
-}
-
-@Composable
-private fun SectionHeader(title: String) {
+private fun Header() {
     Text(
-        title,
-        style = MaterialTheme.typography.headlineSmall,
+        text = "发现",
+        style = MaterialTheme.typography.headlineLarge,
         color = TextPrimary,
-        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 18.dp)
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 4.dp)
     )
 }
 
 @Composable
-private fun SongCard(song: Song, onClick: () -> Unit) {
+private fun RecommendedPlaylists(
+    playlists: List<RecommendedPlaylistUi>,
+    sourceLabel: String?,
+    isLoading: Boolean,
+    error: String?,
+    onClick: (Long) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 18.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("推荐歌单", style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
+        sourceLabel?.let {
+            Spacer(Modifier.width(8.dp))
+            Text("来自$it", style = MaterialTheme.typography.labelSmall, color = TextTertiary)
+        }
+    }
+    when {
+        isLoading && playlists.isEmpty() -> Box(
+            modifier = Modifier.fillMaxWidth().height(150.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            CircularProgressIndicator(color = Green500, modifier = Modifier.size(28.dp))
+        }
+        playlists.isEmpty() -> Text(
+            text = error ?: "暂无推荐歌单",
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextTertiary,
+            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp)
+        )
+        else -> LazyRow(
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(playlists.take(10), key = { it.id }) { playlist ->
+                RecommendedPlaylistCard(playlist) { onClick(playlist.id) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecommendedPlaylistCard(playlist: RecommendedPlaylistUi, onClick: () -> Unit) {
     Column(modifier = Modifier.width(118.dp).clickable(onClick = onClick)) {
         Box(
             modifier = Modifier
                 .size(118.dp)
+                .clip(RoundedCornerShape(12.dp))
                 .glassSurface(RoundedCornerShape(12.dp), elevation = 8.dp)
         ) {
-            val albumUrl = song.album?.picUrl
-            if (!albumUrl.isNullOrBlank()) {
-                AsyncImage(sizedImageUrl(albumUrl, 260), null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            if (!playlist.artworkUrl.isNullOrBlank()) {
+                AsyncImage(
+                    model = sizedImageUrl(playlist.artworkUrl, 260),
+                    contentDescription = playlist.title,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp)
+                    .align(Alignment.BottomCenter)
+                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xB3000000))))
+            )
+            if (playlist.playCount > 0L) {
+                Text(
+                    text = formatPlayCount(playlist.playCount),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .background(Color(0x78090C10), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
             }
         }
-        Text(song.name, style = MaterialTheme.typography.bodySmall, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp))
-        Text(song.artistText, style = MaterialTheme.typography.labelSmall, color = TextTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            text = playlist.title,
+            style = MaterialTheme.typography.bodySmall,
+            color = TextPrimary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 6.dp)
+        )
+    }
+}
+
+private fun formatPlayCount(count: Long): String = when {
+    count >= 100_000_000L -> "${count / 100_000_000L}亿"
+    count >= 10_000L -> "${count / 10_000L}万"
+    else -> count.toString()
+}
+
+@Composable
+private fun RecommendedSongs(
+    songs: List<OnlineTrack>,
+    sourceLabel: String?,
+    isLoading: Boolean,
+    error: String?,
+    onClick: (OnlineTrack) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 22.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("推荐歌曲", style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
+        sourceLabel?.let {
+            Spacer(Modifier.width(8.dp))
+            Text("来自$it", style = MaterialTheme.typography.labelSmall, color = TextTertiary)
+        }
+    }
+    when {
+        isLoading && songs.isEmpty() -> Box(
+            modifier = Modifier.fillMaxWidth().height(150.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            CircularProgressIndicator(color = Green500, modifier = Modifier.size(28.dp))
+        }
+        songs.isEmpty() -> Text(
+            text = error ?: "暂无推荐歌曲",
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextTertiary,
+            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 12.dp)
+        )
+        else -> LazyRow(
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(songs, key = { it.key.asComposite() }) { song ->
+                RecommendedSongCard(song, onClick = { onClick(song) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecommendedSongCard(song: OnlineTrack, onClick: () -> Unit) {
+    Column(modifier = Modifier.width(118.dp).clickable(onClick = onClick)) {
+        Box(
+            modifier = Modifier
+                .size(118.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .glassSurface(RoundedCornerShape(12.dp), elevation = 8.dp)
+        ) {
+            val albumUrl = song.artworkUrl ?: song.album?.artworkUrl
+            if (!albumUrl.isNullOrBlank()) {
+                AsyncImage(
+                    sizedImageUrl(albumUrl, 260),
+                    song.title,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
+        }
+        Text(song.title, style = MaterialTheme.typography.bodySmall, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp))
+        Text(song.artists.joinToString(" / ") { it.name }.ifBlank { "未知歌手" }, style = MaterialTheme.typography.labelSmall, color = TextTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }

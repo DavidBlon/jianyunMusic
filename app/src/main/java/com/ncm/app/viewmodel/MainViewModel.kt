@@ -5,10 +5,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ncm.app.NeteaseApp
 import com.ncm.app.data.AppCache
+import com.ncm.app.data.FavoriteOrderStore
 import com.ncm.app.data.JianyunFavoriteStore
+import com.ncm.app.data.PlaylistMutationResult
+import com.ncm.app.data.UserPlaylistStore
 import com.ncm.app.data.model.*
 import com.ncm.app.data.repository.JianyunOfficialContent
-import com.ncm.app.data.repository.MusicSourceKeyValidationResult
 import com.ncm.app.data.weekly.WeeklyCacheCleaner
 import com.ncm.app.domain.weekly.GenerationKey
 import com.ncm.app.domain.weekly.GenerateWeeklyRecommendationUseCase
@@ -19,22 +21,41 @@ import com.ncm.app.domain.weekly.WeeklyRecUiState
 import com.ncm.app.domain.weekly.canReuseWeeklyRecommendation
 import com.ncm.app.domain.weekly.restoreWeeklyRecommendationOrder
 import com.ncm.app.plugin.model.OnlineTrack
+import com.ncm.app.plugin.model.OnlinePlaylist
+import com.ncm.app.plugin.model.pluginSourceDisplayName
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.temporal.TemporalAdjusters
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-/** 本地首页（P6T3）：只展示本地最近播放、收藏和简云官方内容，不再有网易云推荐（spec §18）。 */
+data class RecommendedPlaylistUi(
+    val id: Long,
+    val title: String,
+    val artworkUrl: String?,
+    val playCount: Long,
+    val creator: String?
+)
+
+internal fun onlinePlaylistUiId(pluginId: String, remoteId: String): Long =
+    -(10_000_000_000L + (("$pluginId#$remoteId".hashCode().toLong()) and 0xffff_ffffL))
+
 data class DiscoverUiState(
-    val officialSongs: List<Song> = emptyList(),
-    val recentSongs: List<Song> = emptyList(),
-    val likedCount: Int = 0,
+    val recommendedPlaylists: List<RecommendedPlaylistUi> = emptyList(),
+    val recommendedSongs: List<OnlineTrack> = emptyList(),
+    val recommendationSourceLabel: String? = null,
+    val recommendationError: String? = null,
+    val songRecommendationError: String? = null,
+    val recommendationSourceId: String? = null,
+    val recommendationsLoaded: Boolean = false,
+    val localContentLoaded: Boolean = false,
     val isLoading: Boolean = false,
     val error: String? = null
 )
@@ -42,6 +63,8 @@ data class DiscoverUiState(
 data class PlaylistDetailUiState(
     val playlist: PlaylistMeta? = null,
     val songs: List<Song> = emptyList(),
+    val pluginTracks: List<OnlineTrack> = emptyList(),
+    val trackOrder: List<String> = emptyList(),
     val isLoading: Boolean = false,
     val error: String? = null,
     val loadedPlaylistId: Long = 0,
@@ -68,12 +91,13 @@ data class SearchUiState(
 )
 
 data class MyUiState(
-    val profile: UserProfile? = null,
+    val playlists: List<Playlist> = emptyList(),
     val likedCount: Int = 0,
     val isLoading: Boolean = true
 )
 
-data class AppUiState(val isLoggedIn: Boolean = false)
+const val LOCAL_FAVORITES_PLAYLIST_ID = -10_001L
+const val RECENTLY_PLAYED_PLAYLIST_ID = -10_002L
 
 class MainViewModel : ViewModel() {
 
@@ -81,8 +105,10 @@ class MainViewModel : ViewModel() {
     private val session = NeteaseApp.instance.session
     private val cache = NeteaseApp.instance.cache
     private val jianyunFavorites = JianyunFavoriteStore(cache) { session.userId }
-    private val musicSourceSettings = NeteaseApp.instance.musicSourceSettings
-    private val musicSourceKeyValidator = NeteaseApp.instance.musicSourceKeyValidator
+    private val favoriteOrderStore = FavoriteOrderStore(cache) { session.userId }
+    private val userPlaylistStore = UserPlaylistStore(cache, userId = { session.userId })
+    private val onlineFavoriteStore = NeteaseApp.instance.onlineFavoriteStore
+    private val onlinePlaybackHistoryStore = NeteaseApp.instance.onlinePlaybackHistoryStore
     private val onlineSourceSettings = NeteaseApp.instance.onlineSourceSettings
 
     private val _discoverState = MutableStateFlow(DiscoverUiState())
@@ -90,6 +116,7 @@ class MainViewModel : ViewModel() {
 
     private val _playlistState = MutableStateFlow(PlaylistDetailUiState())
     val playlistState: StateFlow<PlaylistDetailUiState> = _playlistState
+    private var durationEnrichmentJob: Job? = null
 
     private val _artistDetailState = MutableStateFlow(ArtistDetailUiState())
     val artistDetailState: StateFlow<ArtistDetailUiState> = _artistDetailState
@@ -97,7 +124,9 @@ class MainViewModel : ViewModel() {
     private val _searchState = MutableStateFlow(
         SearchUiState(
             history = loadSearchHistory(),
-            isLinglanConfigured = musicSourceSettings.cardKey.value.isNotBlank()
+            isLinglanConfigured = onlineSourceSettings.currentPluginId
+                ?.let { NeteaseApp.instance.pluginRuntime.providerFor(it) != null }
+                ?: false
         )
     )
     val searchState: StateFlow<SearchUiState> = _searchState
@@ -120,67 +149,112 @@ class MainViewModel : ViewModel() {
     private var weeklyDetailSongsKey: GenerationKey? = null
     private var weeklyDetailLoadingKey: GenerationKey? = null
 
-    private val _appState = MutableStateFlow(AppUiState(isLoggedIn = false))
-    val appState: StateFlow<AppUiState> = _appState
-
     private val generateWeeklyRecommendationUseCase: GenerateWeeklyRecommendationUseCase
         get() = NeteaseApp.instance.generateWeeklyRecommendationUseCase
     private val weeklyCacheCleaner: WeeklyCacheCleaner
         get() = NeteaseApp.instance.weeklyCacheCleaner
 
     private val playlistCache = mutableMapOf<Long, PlaylistDetailUiState>()
+    private val onlinePlaylistByUiId = mutableMapOf<Long, OnlinePlaylist>()
     private val artistDetailCache = mutableMapOf<Long, ArtistDetail>()
     private var searchGeneration = 0
 
-    init {
-        viewModelScope.launch {
-            musicSourceSettings.cardKey.collect { key ->
-                _searchState.value = _searchState.value.copy(
-                    isLinglanConfigured = key.isNotBlank()
-                )
-            }
-        }
-    }
-
-    fun currentProfile(): UserProfile? = session.profile
-
-    suspend fun validateAndSaveMusicSourceKey(
-        key: String
-    ): MusicSourceKeyValidationResult {
-        val result = musicSourceKeyValidator.validate(key)
-        if (result is MusicSourceKeyValidationResult.Valid) {
-            musicSourceSettings.saveValidatedCardKey(key)
-            musicSourceSettings.completeFirstUsePrompt()
-            repo.onMusicSourceKeyChanged()
-        }
-        return result
-    }
-
-    fun skipFirstUseMusicSourcePrompt() {
-        musicSourceSettings.completeFirstUsePrompt()
-    }
-
-    fun clearMusicSourceKey() {
-        musicSourceSettings.clearCardKey()
-        repo.onMusicSourceKeyChanged()
-    }
-
-    // ---- 本地首页（spec §18：本地最近播放/收藏/本地统计）----
+    // ---- 首页：本地内容 + 当前插件明确提供的推荐歌单能力 ----
 
     fun loadDiscover(force: Boolean = false) {
         val current = _discoverState.value
-        if (!force && (current.officialSongs.isNotEmpty() || current.likedCount > 0)) return
+        val sourceId = onlineSourceSettings.currentPluginId
+        if (
+            !force &&
+            current.localContentLoaded &&
+            current.recommendationSourceId == sourceId &&
+            current.recommendationsLoaded
+        ) return
         if (current.isLoading) return
 
         viewModelScope.launch {
             _discoverState.value = current.copy(isLoading = true, error = null)
-            val official = repo.search("").getOrDefault(SearchResponse()).songs
-            val history = loadPlayHistory().orEmpty()
-            val recent = history.take(20)
+            val provider = sourceId?.let { NeteaseApp.instance.pluginRuntime.providerFor(it) }
+            val recommendationResult = when {
+                sourceId == null -> Result.success(emptyList())
+                provider == null -> Result.failure(IllegalStateException("在线来源正在恢复，请稍后重试"))
+                !provider.supportsRecommendedSheets() ->
+                    Result.failure(IllegalStateException("当前音源暂不提供推荐歌单"))
+                else -> try {
+                    Result.success(
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            provider.recommendedSheets(page = 1).items
+                        }
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Result.failure(e)
+                }
+            }
+
+            val onlinePlaylists = recommendationResult.getOrDefault(emptyList())
+            val songRecommendationResult = when {
+                sourceId == null -> Result.success(emptyList())
+                provider == null -> Result.failure(IllegalStateException("在线来源正在恢复，请稍后重试"))
+                onlinePlaylists.isEmpty() -> Result.failure(
+                    recommendationResult.exceptionOrNull()
+                        ?: IllegalStateException("当前音源暂时没有可用推荐")
+                )
+                !provider.supportsMusicSheet() ->
+                    Result.failure(IllegalStateException("当前音源暂不提供推荐歌曲"))
+                else -> try {
+                    val tracks = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        var selected = emptyList<OnlineTrack>()
+                        for (playlist in onlinePlaylists.take(4)) {
+                            val candidate = runCatching {
+                                provider.musicSheetInfo(playlist, page = 1)
+                            }.getOrDefault(emptyList())
+                            if (candidate.isNotEmpty()) {
+                                selected = candidate.take(12)
+                                break
+                            }
+                        }
+                        selected
+                    }
+                    if (tracks.isEmpty()) {
+                        Result.failure(IllegalStateException("当前音源暂时没有可用推荐歌曲"))
+                    } else {
+                        Result.success(tracks)
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Result.failure(e)
+                }
+            }
+            onlinePlaylistByUiId.clear()
+            val recommended = onlinePlaylists.map { playlist ->
+                val uiId = onlinePlaylistUiId(playlist.pluginId, playlist.remoteId)
+                onlinePlaylistByUiId[uiId] = playlist
+                RecommendedPlaylistUi(
+                    id = uiId,
+                    title = playlist.title,
+                    artworkUrl = playlist.artworkUrl,
+                    playCount = playlist.playCount,
+                    creator = playlist.creator
+                )
+            }
             _discoverState.value = DiscoverUiState(
-                officialSongs = official,
-                recentSongs = recent,
-                likedCount = jianyunFavorites.load().size,
+                recommendedPlaylists = recommended,
+                recommendedSongs = songRecommendationResult.getOrDefault(emptyList()),
+                recommendationSourceLabel = sourceId?.let(::sourceLabel),
+                recommendationError = when {
+                    sourceId == null -> "连接在线音源后显示推荐歌单"
+                    else -> recommendationResult.exceptionOrNull()?.message
+                },
+                songRecommendationError = when {
+                    sourceId == null -> "连接在线音源后显示推荐歌曲"
+                    else -> songRecommendationResult.exceptionOrNull()?.message
+                },
+                recommendationSourceId = sourceId,
+                recommendationsLoaded = sourceId == null || provider != null,
+                localContentLoaded = true,
                 isLoading = false
             )
         }
@@ -191,12 +265,75 @@ class MainViewModel : ViewModel() {
     /** 本地播放历史（PlayerViewModel 持久化在同一偏好，跨页面共享）。 */
     private fun loadPlayHistory(): List<Song> {
         val key = AppCache.KEY_PLAY_HISTORY_PREFIX + session.userId
-        return cache.get<List<Song>>(key).orEmpty()
+        return cache.get<List<Song>>(key)
+            .orEmpty()
+            .filter { JianyunOfficialContent.isOfficialSongId(it.id) }
     }
 
     // ---- 歌单详情（每周推荐；在线歌单在插件能力接入前不可用）----
 
     fun loadPlaylistDetail(id: Long, force: Boolean = false) {
+        durationEnrichmentJob?.cancel()
+        userPlaylistStore.content(id)?.let { content ->
+            _playlistState.value = PlaylistDetailUiState(
+                playlist = content.playlist,
+                songs = content.songs,
+                pluginTracks = content.onlineTracks,
+                loadedPlaylistId = id,
+                isFullyLoaded = true
+            )
+            enrichPlaylistDurations(id, content.onlineTracks)
+            return
+        }
+        onlinePlaylistByUiId[id]?.let { playlist ->
+            loadOnlinePlaylistDetail(id, playlist, force)
+            return
+        }
+        if (id == LOCAL_FAVORITES_PLAYLIST_ID || id == RECENTLY_PLAYED_PLAYLIST_ID) {
+            _playlistState.value = PlaylistDetailUiState(
+                playlist = PlaylistMeta(
+                    id = id,
+                    name = if (id == LOCAL_FAVORITES_PLAYLIST_ID) "我喜欢的音乐" else "最近播放"
+                ),
+                isLoading = true,
+                loadedPlaylistId = id,
+            )
+            viewModelScope.launch {
+                val songs = if (id == LOCAL_FAVORITES_PLAYLIST_ID) {
+                    jianyunFavorites.load()
+                } else {
+                    loadPlayHistory()
+                }
+                val pluginTracks = if (id == LOCAL_FAVORITES_PLAYLIST_ID) {
+                    runCatching { onlineFavoriteStore.allFavorites() }.getOrDefault(emptyList())
+                } else {
+                    onlinePlaybackHistoryStore.load()
+                }
+                val trackOrder = if (id == LOCAL_FAVORITES_PLAYLIST_ID) {
+                    favoriteOrderStore.orderedKeys(songs, pluginTracks)
+                } else {
+                    emptyList()
+                }
+                if (_playlistState.value.loadedPlaylistId != id) return@launch
+                _playlistState.value = PlaylistDetailUiState(
+                    playlist = PlaylistMeta(
+                        id = id,
+                        name = if (id == LOCAL_FAVORITES_PLAYLIST_ID) "我喜欢的音乐" else "最近播放",
+                        cover = orderedFavoriteCover(songs, pluginTracks, trackOrder)
+                            ?: songs.firstNotNullOfOrNull { it.album?.picUrl }
+                            ?: pluginTracks.firstNotNullOfOrNull { it.artworkUrl ?: it.album?.artworkUrl },
+                        trackCount = songs.size + pluginTracks.size
+                    ),
+                    songs = songs,
+                    pluginTracks = pluginTracks,
+                    trackOrder = trackOrder,
+                    loadedPlaylistId = id,
+                    isFullyLoaded = true
+                )
+                enrichPlaylistDurations(id, pluginTracks)
+            }
+            return
+        }
         if (id == WEEKLY_PLAYLIST_ID) {
             loadWeeklyPlaylistDetail()
             return
@@ -207,6 +344,80 @@ class MainViewModel : ViewModel() {
             error = "该歌单来自历史网易云数据，暂不可用",
             loadedPlaylistId = id
         )
+    }
+
+    private fun loadOnlinePlaylistDetail(id: Long, playlist: OnlinePlaylist, force: Boolean) {
+        if (!force) {
+            playlistCache[id]?.takeIf { it.isFullyLoaded }?.let {
+                _playlistState.value = it
+                enrichPlaylistDurations(id, it.pluginTracks)
+                return
+            }
+        }
+        if (_playlistState.value.isLoading && _playlistState.value.loadedPlaylistId == id) return
+
+        val initialMeta = PlaylistMeta(
+            id = id,
+            name = playlist.title,
+            cover = playlist.artworkUrl
+        )
+        _playlistState.value = PlaylistDetailUiState(
+            playlist = initialMeta,
+            isLoading = true,
+            loadedPlaylistId = id
+        )
+        viewModelScope.launch {
+            val provider = NeteaseApp.instance.pluginRuntime.providerFor(playlist.pluginId)
+            val result = try {
+                when {
+                    provider == null -> Result.failure(IllegalStateException("在线来源未加载，请返回后重试"))
+                    !provider.supportsMusicSheet() -> Result.failure(IllegalStateException("当前音源暂不支持歌单详情"))
+                    else -> Result.success(
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            provider.musicSheetInfo(playlist, page = 1)
+                        }
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+            if (_playlistState.value.loadedPlaylistId != id) return@launch
+            val tracks = result.getOrDefault(emptyList())
+            val finalState = PlaylistDetailUiState(
+                playlist = initialMeta.copy(trackCount = tracks.size),
+                pluginTracks = tracks,
+                isLoading = false,
+                error = result.exceptionOrNull()?.message
+                    ?: if (tracks.isEmpty()) "该歌单暂时没有可播放歌曲" else null,
+                loadedPlaylistId = id,
+                isFullyLoaded = result.isSuccess
+            )
+            playlistCache[id] = finalState
+            _playlistState.value = finalState
+            enrichPlaylistDurations(id, tracks)
+        }
+    }
+
+    private fun enrichPlaylistDurations(id: Long, tracks: List<OnlineTrack>) {
+        if (tracks.none {
+                it.durationMs == null || it.durationMs <= 0L ||
+                    (it.artworkUrl.isNullOrBlank() && it.album?.artworkUrl.isNullOrBlank())
+            }
+        ) return
+        durationEnrichmentJob?.cancel()
+        durationEnrichmentJob = viewModelScope.launch {
+            val enriched = withContext(Dispatchers.IO) {
+                enrichMissingTrackDurations(tracks) { pluginId ->
+                    NeteaseApp.instance.pluginRuntime.providerFor(pluginId)
+                }
+            }
+            if (_playlistState.value.loadedPlaylistId != id || enriched == tracks) return@launch
+            val updated = _playlistState.value.copy(pluginTracks = enriched)
+            _playlistState.value = updated
+            if (playlistCache.containsKey(id)) playlistCache[id] = updated
+        }
     }
 
     /** 每周推荐以标准歌单详情呈现（网易云相似歌曲接口移除后无数据源，保留空态）。 */
@@ -297,11 +508,15 @@ class MainViewModel : ViewModel() {
     }
 
     fun onLikedSongChanged(song: Song, liked: Boolean) {
-        // 本地收藏（简云官方）即时更新；legacy 网易云条目不支持点赞（spec §12）
-        if (!JianyunOfficialContent.isOfficialSongId(song.id)) return
-        jianyunFavorites.update(song, liked)
-        _myState.value = _myState.value.copy(likedCount = jianyunFavorites.load().size)
-        refreshDiscover()
+        if (JianyunOfficialContent.isOfficialSongId(song.id)) {
+            jianyunFavorites.update(song, liked)
+            favoriteOrderStore.updateLocal(song.id, liked)
+            refreshDiscover()
+        }
+        if (_playlistState.value.loadedPlaylistId == LOCAL_FAVORITES_PLAYLIST_ID) {
+            loadPlaylistDetail(LOCAL_FAVORITES_PLAYLIST_ID, force = true)
+        }
+        loadMyData(force = true)
     }
 
     // ---- 搜索（本地 + 当前插件来源，单来源不兜底）----
@@ -312,7 +527,14 @@ class MainViewModel : ViewModel() {
             clearSearch()
             return
         }
-        if (!force && trimmed == _searchState.value.query && _searchState.value.results.isNotEmpty()) return
+        val currentSearch = _searchState.value
+        // Ignore repeated taps/IME submissions while this exact committed request is running.
+        if (committed && currentSearch.isCommitted && currentSearch.isSearching && trimmed == currentSearch.query) return
+        // An explicit submission (keyboard/history/suggestion) starts a committed search.
+        // SearchScreen's query debounce fires shortly afterwards with the same value; do
+        // not let that non-committed request replace the committed state and its result.
+        if (!force && !committed && trimmed == currentSearch.query && currentSearch.isCommitted) return
+        if (!force && trimmed == currentSearch.query && currentSearch.results.isNotEmpty()) return
 
         val generation = ++searchGeneration
         viewModelScope.launch {
@@ -320,34 +542,46 @@ class MainViewModel : ViewModel() {
                 query = trimmed,
                 results = emptyList(),
                 pluginResults = emptyList(),
+                pluginSourceLabel = null,
                 pluginError = null,
                 isSearching = true,
                 isCommitted = committed
             )
-            val sourceLabel = onlineSourceSettings.currentPluginId
-            val localDeferred = async { repo.search(trimmed).getOrDefault(SearchResponse()) }
-            val pluginDeferred = async { repo.searchFromPlugin(trimmed, page = 1, type = "music") }
+            val sourceId = onlineSourceSettings.currentPluginId
+            val sourceReady = sourceId?.let { NeteaseApp.instance.pluginRuntime.providerFor(it) != null } == true
+            val requestPlan = searchRequestPlan(committed = committed, sourceReady = sourceReady)
+            _searchState.value = _searchState.value.copy(isLinglanConfigured = sourceReady)
+            // 插件搜索在 JS 引擎中阻塞执行，必须在 IO 线程跑，避免卡主线程
+            val localDeferred = async(kotlinx.coroutines.Dispatchers.IO) {
+                repo.search(trimmed).getOrDefault(SearchResponse())
+            }
+            val pluginDeferred = if (requestPlan.searchOnline) {
+                async(kotlinx.coroutines.Dispatchers.IO) {
+                    repo.searchFromPlugin(trimmed, page = 1, type = "music")
+                }
+            } else {
+                null
+            }
             val local = localDeferred.await()
-            val plugin = pluginDeferred.await()
+            val plugin = pluginDeferred?.await()
             if (generation == searchGeneration && _searchState.value.query == trimmed) {
                 _searchState.value = _searchState.value.copy(
                     results = local.songs,
-                    pluginResults = plugin.getOrNull()?.items.orEmpty(),
-                    pluginSourceLabel = sourceLabel?.let(::sourceLabel),
-                    pluginError = sourceLabel?.let { plugin.exceptionOrNull()?.message },
+                    pluginResults = plugin?.getOrNull()?.items.orEmpty(),
+                    pluginSourceLabel = sourceId?.takeIf { sourceReady }?.let(::sourceLabel),
+                    pluginError = when {
+                        sourceId != null && !sourceReady -> "在线来源正在恢复，请稍后重试或到设置中刷新来源"
+                        requestPlan.searchOnline && sourceId != null -> pluginSearchErrorMessage(plugin?.exceptionOrNull())
+                        else -> null
+                    },
+                    isLinglanConfigured = sourceReady,
                     isSearching = false
                 )
             }
         }
     }
 
-    private fun sourceLabel(pluginId: String): String = when (pluginId) {
-        "linglan.kw" -> "酷我"
-        "linglan.kg" -> "酷狗"
-        "linglan.tx" -> "QQ音乐"
-        "linglan.wy" -> "网易云"
-        else -> pluginId
-    }
+    private fun sourceLabel(pluginId: String): String = pluginSourceDisplayName(pluginId)
 
     fun clearSearch() {
         searchGeneration++
@@ -481,21 +715,96 @@ class MainViewModel : ViewModel() {
 
     // ---- 本地资料库 ----
 
+    fun createUserPlaylist(name: String): Long? {
+        val playlistId = userPlaylistStore.create(name) ?: return null
+        loadMyData(force = true)
+        return playlistId
+    }
+
+    fun deleteUserPlaylist(playlistId: Long): Boolean {
+        val deleted = userPlaylistStore.delete(playlistId)
+        if (deleted) {
+            playlistCache.remove(playlistId)
+            loadMyData(force = true)
+        }
+        return deleted
+    }
+
+    fun addSongToUserPlaylist(playlistId: Long, song: Song): PlaylistMutationResult {
+        val result = userPlaylistStore.addSong(playlistId, song)
+        if (result == PlaylistMutationResult.ADDED) refreshUserPlaylist(playlistId)
+        return result
+    }
+
+    fun addOnlineTrackToUserPlaylist(playlistId: Long, track: OnlineTrack): PlaylistMutationResult {
+        val result = userPlaylistStore.addOnlineTrack(playlistId, track)
+        if (result == PlaylistMutationResult.ADDED) refreshUserPlaylist(playlistId)
+        return result
+    }
+
+    fun removeSongFromUserPlaylist(playlistId: Long, songId: Long): Boolean {
+        val removed = userPlaylistStore.removeSong(playlistId, songId)
+        if (removed) refreshUserPlaylist(playlistId)
+        return removed
+    }
+
+    fun removeOnlineTrackFromUserPlaylist(playlistId: Long, track: OnlineTrack): Boolean {
+        val removed = userPlaylistStore.removeOnlineTrack(playlistId, track)
+        if (removed) refreshUserPlaylist(playlistId)
+        return removed
+    }
+
+    private fun refreshUserPlaylist(playlistId: Long) {
+        playlistCache.remove(playlistId)
+        if (_playlistState.value.loadedPlaylistId == playlistId) {
+            loadPlaylistDetail(playlistId, force = true)
+        }
+        loadMyData(force = true)
+    }
+
     fun loadMyData(force: Boolean = false) {
-        if (!force && !_myState.value.isLoading && _myState.value.profile != null) return
+        if (!force && !_myState.value.isLoading && _myState.value.playlists.isNotEmpty()) return
 
         viewModelScope.launch {
             _myState.value = _myState.value.copy(isLoading = true)
-            val likedCount = jianyunFavorites.load().size
-            val profile = session.profile ?: UserProfile(
-                userId = session.userId,
-                nickname = "本地用户"
-            )
+            val likedSongs = jianyunFavorites.load()
+            val onlineLikedSongs = runCatching { onlineFavoriteStore.allFavorites() }.getOrDefault(emptyList())
+            val favoriteOrder = favoriteOrderStore.orderedKeys(likedSongs, onlineLikedSongs)
+            val recentSongs = loadPlayHistory()
+            val onlineRecentSongs = onlinePlaybackHistoryStore.load()
             _myState.value = MyUiState(
-                profile = profile,
-                likedCount = likedCount,
+                playlists = listOf(
+                    Playlist(
+                        id = LOCAL_FAVORITES_PLAYLIST_ID,
+                        name = "我喜欢的音乐",
+                        cover = orderedFavoriteCover(likedSongs, onlineLikedSongs, favoriteOrder)
+                            ?: likedSongs.firstNotNullOfOrNull { it.album?.picUrl }
+                            ?: onlineLikedSongs.firstNotNullOfOrNull { it.artworkUrl ?: it.album?.artworkUrl },
+                        trackCount = likedSongs.size + onlineLikedSongs.size
+                    ),
+                    Playlist(
+                        id = RECENTLY_PLAYED_PLAYLIST_ID,
+                        name = "最近播放",
+                        cover = recentSongs.firstNotNullOfOrNull { it.album?.picUrl }
+                            ?: onlineRecentSongs.firstNotNullOfOrNull { it.artworkUrl ?: it.album?.artworkUrl },
+                        trackCount = recentSongs.size + onlineRecentSongs.size
+                    )
+                ) + userPlaylistStore.summaries(),
+                likedCount = likedSongs.size + onlineLikedSongs.size,
                 isLoading = false
             )
         }
+    }
+
+    private fun orderedFavoriteCover(
+        songs: List<Song>,
+        tracks: List<OnlineTrack>,
+        order: List<String>
+    ): String? {
+        val localCovers = songs.associate { FavoriteOrderStore.localKey(it.id) to it.album?.picUrl }
+        val onlineCovers = tracks.associate {
+            FavoriteOrderStore.onlineKey(it.key) to (it.artworkUrl ?: it.album?.artworkUrl)
+        }
+        return order.firstNotNullOfOrNull { key -> localCovers[key] ?: onlineCovers[key] }
     }
 }

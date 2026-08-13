@@ -20,6 +20,14 @@ enum class PluginCategory { MUSIC, OTHER }
 
 enum class PluginReleaseStatus { ACTIVE, MANDATORY_UPDATE, REVOKED, DISABLED }
 
+fun pluginSourceDisplayName(pluginId: String): String = when (pluginId) {
+    "linglan.kw" -> "酷我"
+    "linglan.kg" -> "酷狗"
+    "linglan.tx" -> "QQ音乐"
+    "linglan.wy" -> "网易云"
+    else -> pluginId
+}
+
 /**
  * 来源感知的歌曲主键：pluginId + remoteId。
  * 收藏、历史、队列、缓存和下载记录都以它标识在线歌曲（spec §5）。
@@ -56,6 +64,18 @@ data class OnlineTrack(
     val album: OnlineAlbum?,
     val durationMs: Long?,
     val artworkUrl: String?,
+    val pluginPayload: BoundedJsonObject
+)
+
+/** A source-owned playlist returned by the active MusicFree provider. */
+data class OnlinePlaylist(
+    val pluginId: String,
+    val remoteId: String,
+    val title: String,
+    val artworkUrl: String?,
+    val description: String?,
+    val playCount: Long,
+    val creator: String?,
     val pluginPayload: BoundedJsonObject
 )
 

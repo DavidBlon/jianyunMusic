@@ -1,7 +1,6 @@
 package com.ncm.app.data.repository
 
 import android.util.Log
-import com.ncm.app.data.SessionManager
 import com.ncm.app.data.model.LyricResponse
 import com.ncm.app.data.model.SearchResponse
 import com.ncm.app.data.model.Song

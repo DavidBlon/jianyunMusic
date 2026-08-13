@@ -7,6 +7,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import com.ncm.app.data.model.ArtistBrief
 
@@ -20,22 +21,25 @@ fun ArtistLinks(
     color: Color = Color.Unspecified,
     suffix: String = "",
     fallback: String = "未知歌手",
-    maxLines: Int = 1
+    maxLines: Int = 1,
+    textAlign: TextAlign = TextAlign.Unspecified
 ) {
     val text = remember(artists, suffix, fallback) {
-        val validArtists = artists.orEmpty().filter { it.id > 0 && it.name.isNotBlank() }
+        val validArtists = artists.orEmpty().filter { it.name.isNotBlank() }
         buildAnnotatedString {
             if (validArtists.isEmpty()) {
                 append(fallback)
             } else {
                 validArtists.forEachIndexed { index, artist ->
                     if (index > 0) append(" / ")
-                    pushStringAnnotation(
-                        tag = ARTIST_ID_TAG,
-                        annotation = artist.id.toString()
-                    )
+                    if (artist.id > 0) {
+                        pushStringAnnotation(
+                            tag = ARTIST_ID_TAG,
+                            annotation = artist.id.toString()
+                        )
+                    }
                     append(artist.name)
-                    pop()
+                    if (artist.id > 0) pop()
                 }
             }
             append(suffix)
@@ -45,7 +49,7 @@ fun ArtistLinks(
     ClickableText(
         text = text,
         modifier = modifier,
-        style = style.merge(TextStyle(color = color)),
+        style = style.merge(TextStyle(color = color, textAlign = textAlign)),
         maxLines = maxLines,
         overflow = TextOverflow.Ellipsis,
         onClick = { offset ->

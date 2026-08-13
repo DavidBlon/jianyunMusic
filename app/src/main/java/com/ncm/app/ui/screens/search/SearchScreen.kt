@@ -10,22 +10,29 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.BasicText
+import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
 import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ncm.app.data.PlaylistMutationResult
+import com.ncm.app.data.isUserPlaylistId
 import com.ncm.app.data.model.Song
+import com.ncm.app.plugin.model.OnlineTrack
+import com.ncm.app.ui.components.AddToPlaylistDialog
 import com.ncm.app.ui.components.LinglanSourceBadge
 import com.ncm.app.ui.components.ArtistLinks
 import com.ncm.app.ui.theme.*
@@ -41,12 +48,18 @@ fun SearchScreen(
     viewModel: MainViewModel = viewModel()
 ) {
     val state by viewModel.searchState.collectAsState()
-    var query by remember { mutableStateOf("") }
+    val myState by viewModel.myState.collectAsState()
+    val userPlaylists = remember(myState.playlists) {
+        myState.playlists.filter { isUserPlaylistId(it.id) }
+    }
+    var query by rememberSaveable { mutableStateOf(state.query) }
+    var songToAdd by remember { mutableStateOf<Song?>(null) }
+    var onlineTrackToAdd by remember { mutableStateOf<OnlineTrack?>(null) }
+    val context = LocalContext.current
 
     LaunchedEffect(Unit) {
-        viewModel.clearSearch()
+        viewModel.loadMyData()
     }
-    DisposableEffect(Unit) { onDispose { viewModel.clearSearch() } }
 
     LaunchedEffect(query) {
         val trimmed = query.trim()
@@ -115,10 +128,11 @@ fun SearchScreen(
                         showLinglanSource = state.isLinglanConfigured && song.fee != 0,
                         onClick = { onSongClick(song.id) },
                         onArtistClick = onArtistClick,
-                        onPlayNext = { onPlayNext(song) }
+                        onPlayNext = { onPlayNext(song) },
+                        onAddToPlaylist = { songToAdd = song }
                     )
                 }
-                if (state.pluginResults.isNotEmpty()) {
+                if (state.isCommitted && state.pluginSourceLabel != null) {
                     item {
                         Text(
                             text = "在线来源：${state.pluginSourceLabel ?: "插件"}",
@@ -131,8 +145,19 @@ fun SearchScreen(
                 items(state.pluginResults, key = { it.key.asComposite() }) { track ->
                     PluginSongItem(
                         track = track,
-                        onClick = { onPluginSongClick(track) }
+                        onClick = { onPluginSongClick(track) },
+                        onAddToPlaylist = { onlineTrackToAdd = track }
                     )
+                }
+                if (!state.isCommitted && state.pluginSourceLabel != null && !state.isSearching) {
+                    item {
+                        Text(
+                            text = "点击放大镜或按键盘搜索，查询${state.pluginSourceLabel}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextTertiary,
+                            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 10.dp)
+                        )
+                    }
                 }
                 if (state.isCommitted && state.pluginSourceLabel != null && state.pluginError != null) {
                     item {
@@ -154,10 +179,16 @@ fun SearchScreen(
                         )
                     }
                 }
-                if (!state.isSearching && state.results.isEmpty() && state.pluginResults.isEmpty() && state.isCommitted) {
+                if (!state.isSearching && state.results.isEmpty() && state.pluginResults.isEmpty() &&
+                    state.isCommitted && state.pluginError == null
+                ) {
                     item {
                         Text(
-                            "没有找到相关歌曲",
+                            if (state.pluginSourceLabel != null && state.pluginError == null) {
+                                "当前在线来源没有返回结果，请稍后重试或更换关键词"
+                            } else {
+                                "没有找到相关歌曲"
+                            },
                             style = MaterialTheme.typography.bodyMedium,
                             color = TextTertiary,
                             modifier = Modifier.padding(start = 20.dp, top = 16.dp)
@@ -167,13 +198,49 @@ fun SearchScreen(
             }
         }
     }
+
+    songToAdd?.let { song ->
+        AddToPlaylistDialog(
+            playlists = userPlaylists,
+            onDismiss = { songToAdd = null },
+            onPlaylistSelected = { playlist ->
+                val result = viewModel.addSongToUserPlaylist(playlist.id, song)
+                android.widget.Toast.makeText(context, result.searchMessage(playlist.name), android.widget.Toast.LENGTH_SHORT).show()
+            },
+            onCreatePlaylist = { name ->
+                val playlistId = viewModel.createUserPlaylist(name)
+                val result = playlistId?.let { viewModel.addSongToUserPlaylist(it, song) }
+                    ?: PlaylistMutationResult.NOT_FOUND
+                android.widget.Toast.makeText(context, result.searchMessage(name), android.widget.Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+
+    onlineTrackToAdd?.let { track ->
+        AddToPlaylistDialog(
+            playlists = userPlaylists,
+            onDismiss = { onlineTrackToAdd = null },
+            onPlaylistSelected = { playlist ->
+                val result = viewModel.addOnlineTrackToUserPlaylist(playlist.id, track)
+                android.widget.Toast.makeText(context, result.searchMessage(playlist.name), android.widget.Toast.LENGTH_SHORT).show()
+            },
+            onCreatePlaylist = { name ->
+                val playlistId = viewModel.createUserPlaylist(name)
+                val result = playlistId?.let { viewModel.addOnlineTrackToUserPlaylist(it, track) }
+                    ?: PlaylistMutationResult.NOT_FOUND
+                android.widget.Toast.makeText(context, result.searchMessage(name), android.widget.Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
 }
 
 @Composable
 private fun PluginSongItem(
     track: com.ncm.app.plugin.model.OnlineTrack,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onAddToPlaylist: () -> Unit
 ) {
+    val coverUrl = track.artworkUrl ?: track.album?.artworkUrl
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -187,9 +254,9 @@ private fun PluginSongItem(
                 .glassSurface(RoundedCornerShape(10.dp), elevation = 6.dp),
             contentAlignment = Alignment.Center
         ) {
-            if (!track.artworkUrl.isNullOrBlank()) {
+            if (!coverUrl.isNullOrBlank()) {
                 coil.compose.AsyncImage(
-                    model = track.artworkUrl,
+                    model = coverUrl,
                     contentDescription = null,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop
@@ -213,6 +280,21 @@ private fun PluginSongItem(
                 overflow = TextOverflow.Ellipsis
             )
         }
+        track.durationMs?.takeIf { it > 0L }?.let { duration ->
+            val totalSeconds = duration / 1_000L
+            Text(
+                text = "%d:%02d".format(totalSeconds / 60L, totalSeconds % 60L),
+                style = MaterialTheme.typography.labelSmall,
+                color = TextTertiary
+            )
+        }
+        IconButton(onClick = onAddToPlaylist) {
+            Icon(
+                androidx.compose.material.icons.Icons.AutoMirrored.Outlined.PlaylistAdd,
+                contentDescription = "添加到歌单",
+                tint = TextTertiary
+            )
+        }
     }
 }
 
@@ -233,8 +315,19 @@ private fun SearchInput(
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(androidx.compose.material.icons.Icons.Outlined.Search, null, tint = TextTertiary, modifier = Modifier.size(18.dp))
-        Spacer(modifier = Modifier.width(8.dp))
+        IconButton(
+            onClick = onSearch,
+            enabled = query.isNotBlank(),
+            modifier = Modifier.size(36.dp)
+        ) {
+            Icon(
+                androidx.compose.material.icons.Icons.Outlined.Search,
+                contentDescription = "搜索",
+                tint = if (query.isBlank()) TextTertiary else Green500,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(2.dp))
         BasicTextField(
             value = query,
             onValueChange = onQueryChange,
@@ -330,7 +423,8 @@ private fun SearchSongItem(
     showLinglanSource: Boolean,
     onClick: () -> Unit,
     onArtistClick: (Long) -> Unit,
-    onPlayNext: () -> Unit
+    onPlayNext: () -> Unit,
+    onAddToPlaylist: () -> Unit
 ) {
     Row(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(modifier = Modifier.weight(1f)) {
@@ -357,7 +451,21 @@ private fun SearchSongItem(
             }
         }
         if (showPlayNext) IconButton(onClick = onPlayNext) { Text("+", color = Green500, fontSize = 26.sp) }
+        IconButton(onClick = onAddToPlaylist) {
+            Icon(
+                androidx.compose.material.icons.Icons.AutoMirrored.Outlined.PlaylistAdd,
+                contentDescription = "添加到歌单",
+                tint = TextTertiary,
+                modifier = Modifier.size(22.dp)
+            )
+        }
         Icon(androidx.compose.material.icons.Icons.Outlined.PlayCircle, null, tint = TextTertiary, modifier = Modifier.size(24.dp))
     }
     HorizontalDivider(color = DarkBorder, thickness = 0.5.dp, modifier = Modifier.padding(start = 20.dp))
+}
+
+private fun PlaylistMutationResult.searchMessage(playlistName: String): String = when (this) {
+    PlaylistMutationResult.ADDED -> "已添加到“$playlistName”"
+    PlaylistMutationResult.ALREADY_EXISTS -> "歌曲已在“$playlistName”中"
+    PlaylistMutationResult.NOT_FOUND -> "歌单不存在，请重试"
 }

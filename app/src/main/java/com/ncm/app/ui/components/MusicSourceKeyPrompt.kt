@@ -3,6 +3,7 @@ package com.ncm.app.ui.components
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -26,6 +27,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -52,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.ncm.app.data.repository.MusicSourceKeyValidationResult
+import com.ncm.app.plugin.manifest.ManifestItem
 import com.ncm.app.ui.screens.legal.DisclaimerDialog
 import com.ncm.app.ui.theme.GlassSurfaceStrong
 import com.ncm.app.ui.theme.Green500
@@ -64,9 +67,39 @@ import kotlinx.coroutines.delay
 private const val MUSIC_SOURCE_SHOP_URL = "https://sumnera.shop.shiqianjiang.cn/"
 private const val DEFAULT_COUPON_CODE = "SUMNERA-8JDAZH9G"
 
+internal sealed interface QuickPasteKeyInput {
+    data class Pasted(
+        val value: String,
+        val validationRevision: Int
+    ) : QuickPasteKeyInput
+
+    data class Unavailable(val message: String) : QuickPasteKeyInput
+}
+
+internal fun quickPasteKeyInput(
+    clipboardText: String?,
+    currentValidationRevision: Int
+): QuickPasteKeyInput {
+    val candidate = clipboardText?.trim().orEmpty()
+    return if (candidate.isBlank()) {
+        QuickPasteKeyInput.Unavailable("剪贴板中没有可粘贴的密钥，请先复制密钥")
+    } else {
+        QuickPasteKeyInput.Pasted(
+            value = candidate,
+            validationRevision = currentValidationRevision + 1
+        )
+    }
+}
+
 @Composable
 fun FirstUseMusicSourcePrompt(
     currentMaskedKey: String?,
+    manifestItems: List<ManifestItem>,
+    selectedPluginId: String?,
+    isRefreshingSources: Boolean,
+    isDownloadingSource: Boolean,
+    sourceError: String?,
+    onSelectSource: (String) -> Unit,
     onClose: (doNotShowAgain: Boolean) -> Unit,
     onValidateAndSave: suspend (String) -> MusicSourceKeyValidationResult
 ) {
@@ -105,13 +138,17 @@ fun FirstUseMusicSourcePrompt(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            "开始使用简云音乐",
+                            if (currentMaskedKey == null) "开始使用简云音乐" else "选择在线音乐来源",
                             style = MaterialTheme.typography.titleLarge,
                             color = TextPrimary,
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            "请选择适合您的听歌方式",
+                            if (currentMaskedKey == null) {
+                                "请选择适合您的听歌方式"
+                            } else {
+                                "密钥验证成功，再选择一个音源即可听歌"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = TextTertiary,
                             modifier = Modifier.padding(top = 4.dp)
@@ -127,34 +164,47 @@ fun FirstUseMusicSourcePrompt(
                     }
                 }
 
-                Text(
-                    "如果您是网易云会员，可以点击右上角的“×”忽略，软件会优先使用您的网易云会员音源。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondary,
-                    modifier = Modifier.padding(top = 14.dp)
-                )
-                Text(
-                    "如果您不是网易云会员，也不购买卡密，同样可以点击右上角的“×”直接使用软件；购买卡密不是强制要求。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondary,
-                    modifier = Modifier.padding(top = 10.dp)
-                )
-                Text(
-                    "如需免费听歌，可前往商城登录注册并购买“聆澜音源”这个商品。购买备用音源后即可免费听歌，推荐选择 15 元的“理论永久”，再复制卡密粘贴到下方。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondary,
-                    modifier = Modifier.padding(top = 10.dp)
-                )
+                if (currentMaskedKey == null) {
+                    Text(
+                        "如果您是网易云会员，可以点击右上角的“×”忽略，软件会优先使用您的网易云会员音源。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary,
+                        modifier = Modifier.padding(top = 14.dp)
+                    )
+                    Text(
+                        "如果您不是网易云会员，也不购买卡密，同样可以点击右上角的“×”直接使用软件；购买卡密不是强制要求。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary,
+                        modifier = Modifier.padding(top = 10.dp)
+                    )
+                    Text(
+                        "如需免费听歌，可前往商城登录注册并购买“聆澜音源”这个商品。购买备用音源后即可免费听歌，推荐选择 15 元的“理论永久”，再复制卡密粘贴到下方。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary,
+                        modifier = Modifier.padding(top = 10.dp)
+                    )
 
-                CouponCodeCard(modifier = Modifier.padding(top = 14.dp))
-                AffiliateDisclosure(modifier = Modifier.padding(top = 10.dp))
-                ShopButton(modifier = Modifier.padding(top = 16.dp))
+                    CouponCodeCard(modifier = Modifier.padding(top = 14.dp))
+                    AffiliateDisclosure(modifier = Modifier.padding(top = 10.dp))
+                    MusicSourceShopButton(modifier = Modifier.padding(top = 16.dp))
 
-                MusicSourceKeyEditor(
-                    currentMaskedKey = currentMaskedKey,
-                    onValidateAndSave = onValidateAndSave,
-                    modifier = Modifier.padding(top = 14.dp)
-                )
+                    MusicSourceKeyEditor(
+                        currentMaskedKey = null,
+                        onValidateAndSave = onValidateAndSave,
+                        modifier = Modifier.padding(top = 14.dp)
+                    )
+                } else {
+                    FirstUseSourcePicker(
+                        currentMaskedKey = currentMaskedKey,
+                        manifestItems = manifestItems,
+                        selectedPluginId = selectedPluginId,
+                        isRefreshing = isRefreshingSources,
+                        isDownloading = isDownloadingSource,
+                        error = sourceError,
+                        onSelectSource = onSelectSource,
+                        modifier = Modifier.padding(top = 14.dp)
+                    )
+                }
 
                 Row(
                     modifier = Modifier
@@ -180,6 +230,74 @@ fun FirstUseMusicSourcePrompt(
                     Text("查看《免责声明》", color = Green500)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun FirstUseSourcePicker(
+    currentMaskedKey: String,
+    manifestItems: List<ManifestItem>,
+    selectedPluginId: String?,
+    isRefreshing: Boolean,
+    isDownloading: Boolean,
+    error: String?,
+    onSelectSource: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        Text(
+            "已验证密钥 $currentMaskedKey。请选择一个音乐来源，选择成功后会自动完成设置。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary
+        )
+        when {
+            isRefreshing -> Row(
+                modifier = Modifier.padding(top = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.width(20.dp).height(20.dp),
+                    strokeWidth = 2.dp,
+                    color = Green500
+                )
+                Spacer(Modifier.width(10.dp))
+                Text("正在获取可用音源…", color = TextTertiary)
+            }
+            manifestItems.isEmpty() -> Text(
+                "暂时没有获取到可用音源，请检查网络后到设置页重试。",
+                style = MaterialTheme.typography.bodySmall,
+                color = RedAccent,
+                modifier = Modifier.padding(top = 14.dp)
+            )
+            else -> manifestItems.forEach { item ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = !isDownloading) { onSelectSource(item.id) }
+                        .padding(vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = selectedPluginId == item.id,
+                        enabled = !isDownloading,
+                        onClick = { onSelectSource(item.id) }
+                    )
+                    Text(
+                        "${item.name} v${item.version}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextPrimary
+                    )
+                }
+            }
+        }
+        error?.let { message ->
+            Text(
+                message,
+                style = MaterialTheme.typography.bodySmall,
+                color = RedAccent,
+                modifier = Modifier.padding(top = 8.dp)
+            )
         }
     }
 }
@@ -220,7 +338,7 @@ fun MusicSourceKeySettingsSheet(
 
             CouponCodeCard(modifier = Modifier.padding(top = 14.dp))
             AffiliateDisclosure(modifier = Modifier.padding(top = 10.dp))
-            ShopButton(modifier = Modifier.padding(top = 10.dp))
+            MusicSourceShopButton(modifier = Modifier.padding(top = 10.dp))
 
             MusicSourceKeyEditor(
                 currentMaskedKey = currentMaskedKey,
@@ -262,7 +380,7 @@ private fun AffiliateDisclosure(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ShopButton(modifier: Modifier = Modifier) {
+fun MusicSourceShopButton(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     Button(
@@ -326,7 +444,7 @@ private fun CouponCodeCard(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun MusicSourceKeyEditor(
+fun MusicSourceKeyEditor(
     currentMaskedKey: String?,
     onValidateAndSave: suspend (String) -> MusicSourceKeyValidationResult,
     modifier: Modifier = Modifier
@@ -336,8 +454,10 @@ private fun MusicSourceKeyEditor(
     val keyboardController = LocalSoftwareKeyboardController.current
     var value by rememberSaveable { mutableStateOf("") }
     var status by remember { mutableStateOf<KeyInputStatus>(KeyInputStatus.Idle) }
+    var validationRevision by rememberSaveable { mutableStateOf(0) }
+    var immediateValidationRevision by remember { mutableStateOf<Int?>(null) }
 
-    LaunchedEffect(value) {
+    LaunchedEffect(validationRevision) {
         val candidate = value.trim()
         status = KeyInputStatus.Idle
         if (candidate.isBlank()) return@LaunchedEffect
@@ -346,7 +466,9 @@ private fun MusicSourceKeyEditor(
             return@LaunchedEffect
         }
 
-        delay(550)
+        if (immediateValidationRevision != validationRevision) {
+            delay(550)
+        }
         status = KeyInputStatus.Checking
         status = when (val result = onValidateAndSave(candidate)) {
             MusicSourceKeyValidationResult.Valid ->
@@ -364,7 +486,11 @@ private fun MusicSourceKeyEditor(
     Column(modifier = modifier.fillMaxWidth()) {
         OutlinedTextField(
             value = value,
-            onValueChange = { value = it },
+            onValueChange = {
+                value = it
+                immediateValidationRevision = null
+                validationRevision += 1
+            },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             label = { Text(if (currentMaskedKey == null) "输入卡密" else "输入新卡密") },
@@ -383,11 +509,26 @@ private fun MusicSourceKeyEditor(
             trailingIcon = {
                 TextButton(
                     onClick = {
-                        clipboard.getText()
-                            ?.text
-                            ?.trim()
-                            ?.takeIf { it.isNotBlank() }
-                            ?.let { value = it }
+                        val clipboardText = runCatching { clipboard.getText()?.text }.getOrNull()
+                        when (
+                            val paste = quickPasteKeyInput(
+                                clipboardText = clipboardText,
+                                currentValidationRevision = validationRevision
+                            )
+                        ) {
+                            is QuickPasteKeyInput.Pasted -> {
+                                value = paste.value
+                                immediateValidationRevision = paste.validationRevision
+                                validationRevision = paste.validationRevision
+                            }
+
+                            is QuickPasteKeyInput.Unavailable -> {
+                                status = KeyInputStatus.Message(
+                                    text = paste.message,
+                                    isError = true
+                                )
+                            }
+                        }
                     }
                 ) {
                     Text("快速粘贴", color = Green500)

@@ -11,6 +11,9 @@ import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 /** 插件模块导出的静态元数据（spec §6.1）。 */
 data class PluginModuleMeta(
@@ -18,6 +21,150 @@ data class PluginModuleMeta(
     val version: String,
     val supportedSearchType: List<String>
 )
+
+/** Decodes the primitive-string envelope used to cross the Android QuickJS JNI boundary. */
+internal fun decodeSettledJsonEnvelope(json: String): Any? {
+    val envelope = com.google.gson.JsonParser.parseString(json)
+    require(envelope.isJsonObject && envelope.asJsonObject.has("value")) {
+        "invalid async result envelope"
+    }
+    return envelope.asJsonObject.get("value").toKotlinJsonValue(depth = 0)
+}
+
+/** Some music APIs return HTTP 200 while a nested service request was rejected. */
+internal fun nestedServiceRejectionCode(json: String): Int? = runCatching {
+    val root = com.google.gson.JsonParser.parseString(json).asJsonObject
+    val code = root.getAsJsonObject("req_1")?.get("code")?.asInt ?: return@runCatching null
+    code.takeIf { it != 0 }
+}.getOrNull()
+
+internal fun qqLegacySearchFallbackRequest(
+    url: String,
+    body: String?,
+    headers: Map<String, String>
+): HttpRequestSpec? = runCatching {
+    if (url.substringBefore('?') != QQ_MUSICU_SEARCH_URL || body.isNullOrBlank()) return@runCatching null
+    val request = com.google.gson.JsonParser.parseString(body).asJsonObject
+        .getAsJsonObject("req_1") ?: return@runCatching null
+    if (request.get("method")?.asString != "DoSearchForQQMusicDesktop" ||
+        request.get("module")?.asString != "music.search.SearchCgiService"
+    ) return@runCatching null
+    val params = request.getAsJsonObject("param") ?: return@runCatching null
+    if (params.get("search_type")?.asInt != 0) return@runCatching null
+    val query = params.get("query")?.asString?.trim().orEmpty()
+    if (query.isBlank()) return@runCatching null
+    val page = params.get("page_num")?.asInt?.coerceAtLeast(1) ?: 1
+    val count = params.get("num_per_page")?.asInt?.coerceIn(1, MAX_RESULTS_PER_PAGE) ?: 20
+    val encodedQuery = java.net.URLEncoder.encode(query, Charsets.UTF_8.name())
+    val fallbackHeaders = headers
+        .filterKeys { !it.equals("Cookie", ignoreCase = true) }
+        .plus("Cookie" to "uin=0")
+    HttpRequestSpec(
+        url = "$QQ_LEGACY_SEARCH_URL?p=$page&n=$count&w=$encodedQuery&format=json",
+        method = "GET",
+        headers = fallbackHeaders
+    )
+}.getOrNull()
+
+internal fun qqLegacyResponseAsMusicu(json: String): String? = runCatching {
+    val legacy = com.google.gson.JsonParser.parseString(json).asJsonObject
+    if (legacy.get("code")?.asInt != 0) return@runCatching null
+    val song = legacy.getAsJsonObject("data")?.getAsJsonObject("song") ?: return@runCatching null
+    val list = song.getAsJsonArray("list") ?: return@runCatching null
+    val total = song.get("totalnum")?.asLong ?: list.size().toLong()
+
+    val meta = com.google.gson.JsonObject().apply { addProperty("sum", total) }
+    val songBody = com.google.gson.JsonObject().apply { add("list", list.deepCopy()) }
+    val bodyObject = com.google.gson.JsonObject().apply { add("song", songBody) }
+    val data = com.google.gson.JsonObject().apply {
+        add("meta", meta)
+        add("body", bodyObject)
+    }
+    val req = com.google.gson.JsonObject().apply {
+        addProperty("code", 0)
+        add("data", data)
+    }
+    com.google.gson.JsonObject().apply {
+        addProperty("code", 0)
+        add("req_1", req)
+    }.toString()
+}.getOrNull()
+
+internal fun qqPlaylistDetailFallbackRequest(
+    url: String,
+    headers: Map<String, String>
+): HttpRequestSpec? = runCatching {
+    val uri = java.net.URI(url)
+    if (uri.host !in setOf("i.y.qq.com", "c.y.qq.com") ||
+        uri.path != "/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg"
+    ) return@runCatching null
+    val params = uri.rawQuery.orEmpty().split('&').mapNotNull { pair ->
+        val parts = pair.split('=', limit = 2)
+        if (parts.size != 2) null else parts[0] to java.net.URLDecoder.decode(parts[1], Charsets.UTF_8.name())
+    }.toMap()
+    val playlistId = params["disstid"]?.toLongOrNull() ?: return@runCatching null
+    val body = com.google.gson.JsonObject().apply {
+        add("comm", com.google.gson.JsonObject().apply {
+            addProperty("ct", 24)
+            addProperty("cv", 0)
+            addProperty("uin", 0)
+            addProperty("format", "json")
+        })
+        add("req", com.google.gson.JsonObject().apply {
+            addProperty("module", "music.srfDissInfo.aiDissInfo")
+            addProperty("method", "uniform_get_Dissinfo")
+            add("param", com.google.gson.JsonObject().apply {
+                addProperty("disstid", playlistId)
+                addProperty("enc_host_uin", "")
+                addProperty("tag", 1)
+                addProperty("userinfo", 1)
+                addProperty("song_begin", 0)
+                addProperty("song_num", 20)
+            })
+        })
+    }.toString()
+    HttpRequestSpec(
+        url = QQ_MUSICU_SEARCH_URL,
+        method = "POST",
+        headers = headers
+            .filterKeys { !it.equals("Cookie", ignoreCase = true) }
+            .plus("Content-Type" to "application/json")
+            .plus("Cookie" to "uin=0"),
+        body = body.toByteArray(Charsets.UTF_8)
+    )
+}.getOrNull()
+
+internal fun qqPlaylistDetailResponseAsLegacy(json: String): String? = runCatching {
+    val root = com.google.gson.JsonParser.parseString(json).asJsonObject
+    val req = root.getAsJsonObject("req") ?: return@runCatching null
+    if (req.get("code")?.asInt != 0) return@runCatching null
+    val data = req.getAsJsonObject("data") ?: return@runCatching null
+    if (data.get("code")?.asInt != 0) return@runCatching null
+    val songList = data.getAsJsonArray("songlist") ?: return@runCatching null
+    val playlist = com.google.gson.JsonObject().apply { add("songlist", songList.deepCopy()) }
+    com.google.gson.JsonObject().apply {
+        addProperty("code", 0)
+        add("cdlist", com.google.gson.JsonArray().apply { add(playlist) })
+    }.toString()
+}.getOrNull()
+
+private const val QQ_MUSICU_SEARCH_URL = "https://u.y.qq.com/cgi-bin/musicu.fcg"
+private const val QQ_LEGACY_SEARCH_URL = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp"
+
+private fun com.google.gson.JsonElement.toKotlinJsonValue(depth: Int): Any? {
+    require(depth <= 16) { "async result exceeds maximum depth" }
+    return when {
+        isJsonNull -> null
+        isJsonArray -> asJsonArray.map { it.toKotlinJsonValue(depth + 1) }
+        isJsonObject -> asJsonObject.entrySet().associate { (key, value) ->
+            key to value.toKotlinJsonValue(depth + 1)
+        }
+        asJsonPrimitive.isBoolean -> asBoolean
+        asJsonPrimitive.isString -> asString
+        asJsonPrimitive.isNumber -> asString.toLongOrNull() ?: asString.toDouble()
+        else -> null
+    }
+}
 
 /**
  * QuickJS 运行时封装：每个插件一个独立上下文（GC #7）。
@@ -44,6 +191,7 @@ class QuickJsRuntime(
     private val loaded = mutableMapOf<String, LoadedPlugin>()
 
     private class LoadedPlugin(val context: QuickJSContext, val exports: JSObject)
+    private data class SettledPromiseJson(val envelope: String)
 
     fun useHttpExecutor(executor: HttpExecutor) { httpExecutor = executor }
 
@@ -53,9 +201,13 @@ class QuickJsRuntime(
      */
     fun loadModule(pluginId: String, script: String, hostParams: Map<String, Any?>): PluginModuleMeta = submit {
         val context = QuickJSContext.create()
-        context.setMemoryLimit(maxMemoryMb)
-        context.setConsole(RedactingConsole)
+        // wrapper-android takes this value in bytes, while this runtime is configured in MiB.
+        // Applying a raw value such as 64 creates a 64-byte heap and makes every plugin fail.
         installHost(context, hostParams)
+        context.setMemoryLimit(maxMemoryMb * BYTES_PER_MIB)
+        // The script preamble supplies the redacting console through __host.log.
+        // Do not call wrapper setConsole(): it installs a global `console` binding that
+        // conflicts with that preamble and can overflow the wrapper's native error path.
         context.evaluate(PREAMBLE + "\n" + script)
         val module = context.getGlobalObject().getJSObject("module")
             ?: throw PluginException("INVALID_META", "插件未导出 module.exports", retryable = false)
@@ -80,6 +232,15 @@ class QuickJsRuntime(
     }
 
     /** 调用已装载插件导出的方法；返回值由宿主桥接为 Kotlin 类型（Map/List/基本类型）。 */
+    /** Checks the preamble export helper without requiring plugins to export it. */
+    fun hasExport(pluginId: String, name: String): Boolean = submit {
+        val plugin = loaded[pluginId]
+            ?: throw PluginException("PLUGIN_NOT_LOADED", "plugin is not loaded", retryable = false)
+        val helper = plugin.context.getGlobalObject().getJSFunctionProperty("hasExport")
+            ?: throw PluginException("PLUGIN_ERROR", "export-check helper unavailable", retryable = false)
+        helper.call(name) as? Boolean ?: false
+    }
+
     fun invokeMethod(pluginId: String, name: String, args: Array<Any?>): Any? = submit {
         val plugin = loaded[pluginId]
             ?: throw PluginException("PLUGIN_NOT_LOADED", "插件未装载", retryable = false)
@@ -88,7 +249,11 @@ class QuickJsRuntime(
         val jsArgs = args.map { toJsValue(plugin.context, it) }.toTypedArray()
         val raw = fn.call(*jsArgs)
         val settled = settlePromise(plugin, raw)
-        jsToKotlin(settled, depth = 0)
+        if (settled is SettledPromiseJson) {
+            decodeSettledJsonEnvelope(settled.envelope)
+        } else {
+            jsToKotlin(settled, depth = 0)
+        }
     }
 
     fun destroy() {
@@ -131,13 +296,20 @@ class QuickJsRuntime(
         if (promise.getProperty("then") == null) return raw
         val context = plugin.context
         val global = context.getGlobalObject()
-        context.evaluate("__awaitState = undefined; __awaitValue = undefined; __awaitError = undefined;")
+        context.evaluate("__awaitState = undefined; __awaitValueJson = undefined; __awaitError = undefined;")
         global.setProperty("__await", promise)
         var iterations = 0
         while (iterations < PROMISE_POLL_ITERATIONS) {
             val state = context.evaluate("__pollAwait()") as? String
             when (state) {
-                "resolved" -> return global.getProperty("__awaitValue")
+                "resolved" -> return SettledPromiseJson(
+                    (global.getProperty("__awaitValueJson") as? String)
+                        ?: throw PluginException(
+                            "PLUGIN_ERROR",
+                            "插件异步结果无法序列化",
+                            retryable = true
+                        )
+                )
                 "rejected" -> throw PluginException(
                     "PLUGIN_ERROR",
                     (global.getProperty("__awaitError") as? String) ?: "插件异步调用失败",
@@ -159,6 +331,40 @@ class QuickJsRuntime(
             RedactingConsole.log(RedactingConsole.redact(args.joinToString(" ")))
             null
         })
+        host.setProperty("md5", JSCallFunction { args ->
+            val input = (args.getOrNull(0) as? String).orEmpty()
+            java.security.MessageDigest.getInstance("MD5")
+                .digest(input.toByteArray(Charsets.UTF_8))
+                .joinToString("") { byte -> "%02x".format(byte) }
+        })
+        host.setProperty("decodeBase64Utf8", JSCallFunction { args ->
+            val input = (args.getOrNull(0) as? String).orEmpty()
+            runCatching {
+                String(java.util.Base64.getDecoder().decode(input), Charsets.UTF_8)
+            }.getOrDefault("")
+        })
+        host.setProperty("aesCbcPkcs7Base64", JSCallFunction { args ->
+            val value = (args.getOrNull(0) as? String).orEmpty()
+            val key = (args.getOrNull(1) as? String).orEmpty()
+            val iv = (args.getOrNull(2) as? String).orEmpty()
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(
+                Cipher.ENCRYPT_MODE,
+                SecretKeySpec(key.toByteArray(Charsets.UTF_8), "AES"),
+                IvParameterSpec(iv.toByteArray(Charsets.UTF_8))
+            )
+            java.util.Base64.getEncoder().encodeToString(
+                cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+            )
+        })
+        host.setProperty("modPowHex", JSCallFunction { args ->
+            val value = (args.getOrNull(0) as? String).orEmpty()
+            val exponent = (args.getOrNull(1) as? String).orEmpty()
+            val modulus = (args.getOrNull(2) as? String).orEmpty()
+            java.math.BigInteger(value, 16)
+                .modPow(java.math.BigInteger(exponent, 16), java.math.BigInteger(modulus, 16))
+                .toString(16)
+        })
         global.setProperty("__host", host)
         // 只读运行参数：JSON 注入，JS 侧解析为冻结对象（spec §7.1）
         global.setProperty("__hostParamsJson", simpleJson(hostParams))
@@ -177,14 +383,46 @@ class QuickJsRuntime(
         if (url.isNullOrBlank()) return """{"error":"missing url"}"""
         return try {
             val headers = headersJson?.let { parseJsonMap(it) }.orEmpty()
-            val result = kotlinx.coroutines.runBlocking {
-                executor(HttpRequestSpec(url, method, headers, body?.toByteArray(Charsets.UTF_8)))
+            // The JS bridge uses an empty string as the no-body sentinel. OkHttp rejects
+            // any request body for GET/HEAD, even a zero-byte one, so normalise it here
+            // at the JVM boundary rather than passing JS null through the native wrapper.
+            val requestBody = if (method.equals("GET", ignoreCase = true) || method.equals("HEAD", ignoreCase = true)) {
+                null
+            } else {
+                body?.toByteArray(Charsets.UTF_8)
             }
-            val data = String(result.data, Charsets.UTF_8)
+            val playlistFallback = qqPlaylistDetailFallbackRequest(url, headers)
+            var result = kotlinx.coroutines.runBlocking {
+                executor(playlistFallback ?: HttpRequestSpec(url, method, headers, requestBody))
+            }
+            var data = String(result.data, Charsets.UTF_8)
+            if (playlistFallback != null) {
+                val legacy = qqPlaylistDetailResponseAsLegacy(data)
+                    ?: return """{"error":"source playlist detail request failed"}"""
+                // The legacy plugin deliberately parses this endpoint as JSONP text.
+                // Keeping the callback wrapper prevents the host bridge from eagerly
+                // embedding valid JSON as an object before the plugin calls replace().
+                data = "callback($legacy)"
+            }
+            if (nestedServiceRejectionCode(data) == 2001) {
+                qqLegacySearchFallbackRequest(url, body, headers)?.let { fallbackRequest ->
+                    val fallbackResult = kotlinx.coroutines.runBlocking { executor(fallbackRequest) }
+                    val converted = qqLegacyResponseAsMusicu(
+                        String(fallbackResult.data, Charsets.UTF_8)
+                    )
+                    if (converted != null) {
+                        result = fallbackResult
+                        data = converted
+                    }
+                }
+            }
+            nestedServiceRejectionCode(data)?.let { code ->
+                return """{"error":"source service rejected request (code $code)"}"""
+            }
             val headerJson = result.headers.entries.joinToString(",") { (k, v) ->
                 "\"${escapeJson(k)}\":\"${escapeJson(v)}\""
             }
-            """{"status":${result.status},"headers":{$headerJson},"data":${escapeJson(data)}}"""
+            """{"status":${result.status},"headers":{$headerJson},"data":${jsonValueOrString(data)}}"""
         } catch (e: Exception) {
             """{"error":"${escapeJson(e.message ?: "http error")}"}"""
         }
@@ -234,10 +472,18 @@ class QuickJsRuntime(
         emptyMap()
     }
 
+    private fun jsonValueOrString(value: String): String = try {
+        com.google.gson.JsonParser.parseString(value).toString()
+    } catch (_: Exception) {
+        "\"${escapeJson(value)}\""
+    }
+
     private fun escapeJson(value: String): String = value
         .replace("\\", "\\\\")
         .replace("\"", "\\\"")
+        .replace("\r", "\\r")
         .replace("\n", "\\n")
+        .replace("\t", "\\t")
 
     private fun simpleJson(value: Map<String, Any?>): String = try {
         com.google.gson.Gson().toJson(value)
@@ -264,12 +510,41 @@ class QuickJsRuntime(
     private companion object {
         const val DEFAULT_CALL_TIMEOUT_MS = 10_000L
         const val DEFAULT_MAX_MEMORY_MB = 64
+        const val BYTES_PER_MIB = 1024 * 1024
         const val MAX_JS_DEPTH = 8
         const val PROMISE_POLL_ITERATIONS = 200
 
         /** 宿主注入的 JS 前置：module/exports/require + 兼容模块 + 受控宿主对象。 */
         const val PREAMBLE = """
             'use strict';
+            /* The bundled Android QuickJS is ES2016-era, while current MusicFree scripts
+               are compiled against newer built-ins. Fill only missing standard methods. */
+            if (!Object.entries) Object.entries = function (obj) {
+              var out = [];
+              Object.keys(Object(obj)).forEach(function (key) { out.push([key, obj[key]]); });
+              return out;
+            };
+            if (!Object.values) Object.values = function (obj) {
+              return Object.keys(Object(obj)).map(function (key) { return obj[key]; });
+            };
+            if (!Object.fromEntries) Object.fromEntries = function (entries) {
+              var out = {};
+              entries.forEach(function (entry) { out[entry[0]] = entry[1]; });
+              return out;
+            };
+            if (!Array.prototype.includes) Array.prototype.includes = function (value, start) {
+              return this.indexOf(value, start || 0) >= 0;
+            };
+            if (!String.prototype.includes) String.prototype.includes = function (value, start) {
+              return this.indexOf(value, start || 0) >= 0;
+            };
+            if (!String.prototype.startsWith) String.prototype.startsWith = function (value, start) {
+              return this.indexOf(value, start || 0) === (start || 0);
+            };
+            if (!String.prototype.endsWith) String.prototype.endsWith = function (value, end) {
+              var limit = end === undefined ? this.length : end;
+              return this.substring(limit - value.length, limit) === value;
+            };
             var module = { exports: {} };
             var exports = module.exports;
             var __modules = {};
@@ -288,22 +563,74 @@ class QuickJsRuntime(
               warn: function (m) { __host.log(String(m)); },
               error: function (m) { __host.log(String(m)); }
             };
-            function setTimeout() { return 0; } /* 宿主不提供真实定时器；异步超时由宿主轮询上限兜底 */
+            function setTimeout(fn) {
+              /* No timer thread crosses the native boundary. Run zero-delay callbacks now;
+                 overall async timeouts are still enforced by the Kotlin worker. */
+              if (typeof fn === 'function') fn();
+              return 0;
+            }
             function clearTimeout() {}
             var process = { env: {} };
 
             /* ---- 受控 HTTP 兼容（spec §6.3：status/headers/data） ---- */
             function __httpRequest(url, method, headers, body) {
+              // Keep the native bridge argument a string. The Kotlin boundary converts the
+              // empty-string no-body sentinel to null for GET/HEAD before reaching OkHttp.
               var raw = __host.request(url, method || 'GET', JSON.stringify(headers || {}), body || '');
               var parsed = JSON.parse(raw);
               if (parsed.error) throw new Error('host http error: ' + parsed.error);
               return { status: parsed.status, headers: parsed.headers || {}, data: parsed.data };
             }
-            __defineCompat('axios', {
-              get: function (url, opts) { return Promise.resolve(__httpRequest(url, 'GET', (opts || {}).headers, null)); },
-              post: function (url, body, opts) { return Promise.resolve(__httpRequest(url, 'POST', (opts || {}).headers, typeof body === 'string' ? body : JSON.stringify(body || {}))); },
-              request: function (cfg) { return Promise.resolve(__httpRequest(cfg.url || '', cfg.method || 'GET', cfg.headers || {}, cfg.data || '')); }
-            });
+            function __appendQuery(url, params) {
+              if (!params) return url;
+              var query = typeof params === 'string' ? params : __queryString(params);
+              if (!query) return url;
+              return url + (url.indexOf('?') >= 0 ? '&' : '?') + query;
+            }
+            function __queryString(obj) {
+              var parts = [];
+              for (var k in (obj || {})) {
+                if (!Object.prototype.hasOwnProperty.call(obj, k) || obj[k] === undefined || obj[k] === null) continue;
+                var value = obj[k];
+                if (Array.isArray(value)) {
+                  value.forEach(function (entry) { parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(entry)); });
+                } else {
+                  parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(value));
+                }
+              }
+              return parts.join('&');
+            }
+            function __axios(config) {
+              if (typeof config === 'string') config = { url: config };
+              config = config || {};
+              var body = config.data;
+              if (body !== null && body !== undefined && typeof body !== 'string') body = JSON.stringify(body);
+              return Promise.resolve(__httpRequest(
+                __appendQuery(config.url || '', config.params),
+                String(config.method || 'GET').toUpperCase(),
+                config.headers || {},
+                body || ''
+              ));
+            }
+            __axios.get = function (url, opts) {
+              opts = opts || {};
+              return __axios({ url: url, method: 'GET', headers: opts.headers || {}, params: opts.params });
+            };
+            __axios.post = function (url, body, opts) {
+              opts = opts || {};
+              return __axios({ url: url, method: 'POST', headers: opts.headers || {}, data: body });
+            };
+            __axios.put = function (url, body, opts) {
+              opts = opts || {};
+              return __axios({ url: url, method: 'PUT', headers: opts.headers || {}, data: body });
+            };
+            __axios.delete = function (url, opts) {
+              opts = opts || {};
+              return __axios({ url: url, method: 'DELETE', headers: opts.headers || {}, params: opts.params, data: opts.data });
+            };
+            __axios.request = __axios;
+            __axios.default = __axios;
+            __defineCompat('axios', __axios);
             __defineCompat('qs', {
               stringify: function (obj) {
                 var parts = [];
@@ -320,19 +647,129 @@ class QuickJsRuntime(
                 return out;
               }
             });
-            ['crypto-js', 'big-integer', 'dayjs', 'cheerio', 'he'].forEach(function (name) {
-              __defineCompat(name, { __unsupported: true });
-            });
+
+            /* ---- Small compatibility shims used by real MusicFree providers ---- */
+            function __decodeHtml(value) {
+              var named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+              return String(value == null ? '' : value).replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, function (_, entity) {
+                var lower = String(entity).toLowerCase();
+                if (lower.charAt(0) === '#') {
+                  var radix = lower.charAt(1) === 'x' ? 16 : 10;
+                  var digits = radix === 16 ? lower.slice(2) : lower.slice(1);
+                  var code = parseInt(digits, radix);
+                  return isNaN(code) ? _ : String.fromCodePoint(code);
+                }
+                return Object.prototype.hasOwnProperty.call(named, lower) ? named[lower] : _;
+              });
+            }
+            var __he = { decode: __decodeHtml };
+            __he.default = __he;
+            __defineCompat('he', __he);
+
+            var __cheerio = {
+              load: function (html) {
+                var text = __decodeHtml(String(html == null ? '' : html)
+                  .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+                  .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+                  .replace(/<[^>]+>/g, ''));
+                var root = function () { return { text: function () { return text; } }; };
+                root.text = function () { return text; };
+                return root;
+              }
+            };
+            __cheerio.default = __cheerio;
+            __defineCompat('cheerio', __cheerio);
+
+            var __cryptoUtf8 = {
+              parse: function (value) { return { __utf8: String(value == null ? '' : value) }; },
+              stringify: function (value) { return value && value.__utf8 || ''; }
+            };
+            var __cryptoBase64 = {
+              parse: function (value) {
+                var decoded = __host.decodeBase64Utf8(String(value || ''));
+                return {
+                  __utf8: decoded,
+                  toString: function (encoder) {
+                    return encoder && typeof encoder.stringify === 'function'
+                      ? encoder.stringify(this)
+                      : this.__utf8;
+                  }
+                };
+              }
+            };
+            var __crypto = {
+              MD5: function (value) {
+                var digest = __host.md5(String(value == null ? '' : value));
+                return { toString: function () { return digest; } };
+              },
+              AES: {
+                encrypt: function (value, key, options) {
+                  var encrypted = __host.aesCbcPkcs7Base64(
+                    value && value.__utf8 || String(value == null ? '' : value),
+                    key && key.__utf8 || String(key == null ? '' : key),
+                    options && options.iv && options.iv.__utf8 || ''
+                  );
+                  return { toString: function () { return encrypted; } };
+                }
+              },
+              mode: { CBC: {} },
+              pad: { Pkcs7: {} },
+              enc: { Base64: __cryptoBase64, Utf8: __cryptoUtf8 }
+            };
+            __crypto.default = __crypto;
+            __defineCompat('crypto-js', __crypto);
+
+            function __bigInteger(value, radix) {
+              var wrapped = {
+                __value: String(value == null ? '0' : value),
+                __radix: radix || 10,
+                modPow: function (exponent, modulus) {
+                  return __bigInteger(__host.modPowHex(
+                    this.__value,
+                    exponent.__value,
+                    modulus.__value
+                  ), 16);
+                },
+                toString: function () { return this.__value; }
+              };
+              return wrapped;
+            }
+            __bigInteger.default = __bigInteger;
+            __defineCompat('big-integer', __bigInteger);
+
+            function __twoDigits(value) { return value < 10 ? '0' + value : String(value); }
+            function __dayjs(value) {
+              var date = value instanceof Date ? value : new Date(value);
+              return {
+                format: function (pattern) {
+                  if (pattern === 'YYYY-MM-DD') {
+                    return date.getFullYear() + '-' + __twoDigits(date.getMonth() + 1) + '-' + __twoDigits(date.getDate());
+                  }
+                  return date.toISOString();
+                }
+              };
+            }
+            __dayjs.unix = function (seconds) { return __dayjs(Number(seconds) * 1000); };
+            __dayjs.default = __dayjs;
+            __defineCompat('dayjs', __dayjs);
 
             /* ---- Promise 轮询等待（宿主每次 evaluate 推进微任务） ---- */
             var __awaitState;
-            var __awaitValue;
+            var __awaitValueJson;
             var __awaitError;
             function __pollAwait() {
               if (__awaitState === undefined && __await !== undefined) {
                 __awaitState = 'pending';
                 Promise.resolve(__await).then(
-                  function (v) { __awaitState = 'resolved'; __awaitValue = v; },
+                  function (v) {
+                    try {
+                      __awaitValueJson = JSON.stringify({ value: v });
+                      __awaitState = 'resolved';
+                    } catch (e) {
+                      __awaitState = 'rejected';
+                      __awaitError = 'async result is not serializable';
+                    }
+                  },
                   function (e) { __awaitState = 'rejected'; __awaitError = String((e && e.message) || e); }
                 );
               }

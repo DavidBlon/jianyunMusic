@@ -13,6 +13,8 @@ class RegistryPluginRuntime(
 
     override fun providerFor(pluginId: String): MusicProvider? = registry.currentProvider(pluginId)
 
+    override fun availableProviders(): List<MusicProvider> = registry.availableProviders()
+
     override fun load(pluginId: String, script: String, hostParams: Map<String, Any?>): MusicProvider =
         throw UnsupportedOperationException("装载请走 PluginRegistry.install（含签名门禁与两步检查）")
 

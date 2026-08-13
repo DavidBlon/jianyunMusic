@@ -65,6 +65,7 @@ val paidMusicApiUrl = nonBlank(providers.gradleProperty("paidMusicApiUrl").orNul
     ?: nonBlank(localProperties.getProperty("paidMusicApiUrl"))
     ?: paidMusicScriptConstant("API_URL")
     ?: "https://source.shiqianjiang.cn/api/music"
+val paidMusicScriptCheckId = paidMusicScriptConstant("SCRIPT_MD5").orEmpty()
 
 val jianyunContentBaseUrl = nonBlank(providers.gradleProperty("jianyunContentBaseUrl").orNull)
     ?: nonBlank(providers.environmentVariable("JIANYUN_CONTENT_BASE_URL").orNull)
@@ -85,11 +86,12 @@ android {
         applicationId = "com.ncm.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 9
-        versionName = "1.4.0"
+        versionCode = 10
+        versionName = "2.4.0"
 
         buildConfigField("String", "API_BASE_URL", "\"https://music.163.com/\"")
         buildConfigField("String", "PAID_MUSIC_API_URL", buildConfigString(paidMusicApiUrl))
+        buildConfigField("String", "PAID_MUSIC_SCRIPT_CHECK_ID", buildConfigString(paidMusicScriptCheckId))
         buildConfigField("String", "JIANYUN_CONTENT_BASE_URL", buildConfigString(jianyunContentBaseUrl))
     }
 

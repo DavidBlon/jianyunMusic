@@ -30,11 +30,8 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.FavoriteBorder
-import androidx.compose.material.icons.outlined.HighQuality
-import androidx.compose.material.icons.outlined.Repeat
-import androidx.compose.material.icons.outlined.RepeatOne
-import androidx.compose.material.icons.outlined.Shuffle
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.*
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -71,20 +68,24 @@ import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import coil.request.CachePolicy
 import coil.request.ImageRequest
 import com.ncm.app.ui.theme.*
 import com.ncm.app.NeteaseApp
 import com.ncm.app.playback.AppPlayer
+import com.ncm.app.data.PlaylistMutationResult
+import com.ncm.app.data.isUserPlaylistId
 import com.ncm.app.data.model.PlaybackSource
 import com.ncm.app.data.model.ArtistBrief
+import com.ncm.app.data.model.Song
+import com.ncm.app.plugin.model.OnlineTrack
+import com.ncm.app.ui.components.AddToPlaylistDialog
 import com.ncm.app.ui.components.ArtistLinks
 import com.ncm.app.ui.components.LinglanSourceBadge
 import com.ncm.app.util.albumArtworkUrl
 import com.ncm.app.util.albumArtworkDisplayScale
 import com.ncm.app.util.albumArtworkThumbnailCacheKey
 import com.ncm.app.viewmodel.MainViewModel
-import com.ncm.app.viewmodel.PlayMode
-import com.ncm.app.viewmodel.PlaybackQuality
 import com.ncm.app.viewmodel.PlayerViewModel
 import kotlinx.coroutines.delay
 import kotlin.math.PI
@@ -103,8 +104,14 @@ fun PlayerScreen(
     viewModel: PlayerViewModel = viewModel()
 ) {
     val state by viewModel.state.collectAsState()
-    var qualityMenuExpanded by remember { mutableStateOf(false) }
+    val myState by mainViewModel.myState.collectAsState()
+    val userPlaylists = remember(myState.playlists) {
+        myState.playlists.filter { isUserPlaylistId(it.id) }
+    }
     var bottomPanel by remember { mutableStateOf<PlayerBottomPanel?>(null) }
+    var songToAdd by remember { mutableStateOf<Song?>(null) }
+    var onlineTrackToAdd by remember { mutableStateOf<OnlineTrack?>(null) }
+    val context = LocalContext.current
     val appearanceSettings = NeteaseApp.instance.playerAppearanceSettings
     val playerLayout by appearanceSettings.layout.collectAsState()
     val playerBackground by appearanceSettings.background.collectAsState()
@@ -117,6 +124,7 @@ fun PlayerScreen(
 
     LaunchedEffect(songId) {
         viewModel.open(songId)
+        mainViewModel.loadMyData()
     }
 
     var rotation by remember { mutableFloatStateOf(0f) }
@@ -174,9 +182,19 @@ fun PlayerScreen(
                     mainViewModel.onLikedSongChanged(song, liked)
                 }
             },
+            onAddToPlaylistClick = {
+                bottomPanel = null
+                val onlineTrack = viewModel.currentOnlineTrack()
+                if (onlineTrack != null) {
+                    onlineTrackToAdd = onlineTrack
+                } else {
+                    songToAdd = state.currentSong
+                }
+            },
             onAppearanceClick = { bottomPanel = PlayerBottomPanel.APPEARANCE },
             showSongInfo = componentVisibility.songInfo,
             showFavorite = componentVisibility.favorite,
+            showAddToPlaylist = state.currentSong != null,
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
@@ -248,20 +266,14 @@ fun PlayerScreen(
                 progress = state.progress,
                 currentPosition = state.currentPosition,
                 duration = state.duration,
-                playMode = state.playMode,
                 isPlaying = state.isPlaying,
-                quality = state.quality,
-                qualityMenuExpanded = qualityMenuExpanded,
                 showProgress = componentVisibility.progress,
                 showTransport = componentVisibility.transport,
                 showExtras = componentVisibility.extras,
-                onQualityMenuExpandedChange = { qualityMenuExpanded = it },
-                onPlayModeClick = { viewModel.togglePlayMode() },
                 onPrevClick = { viewModel.playPrev() },
                 onPlayPauseClick = { viewModel.togglePlay() },
                 onNextClick = { viewModel.playNext() },
                 onSeek = { viewModel.setProgress(it) },
-                onQualityClick = { viewModel.setQuality(it) },
                 onQueueClick = { bottomPanel = PlayerBottomPanel.QUEUE },
                 onSleepClick = { bottomPanel = PlayerBottomPanel.SLEEP },
                 modifier = Modifier
@@ -269,6 +281,56 @@ fun PlayerScreen(
                     .navigationBarsPadding()
             )
         }
+    }
+
+    songToAdd?.let { song ->
+        AddToPlaylistDialog(
+            playlists = userPlaylists,
+            onDismiss = { songToAdd = null },
+            onPlaylistSelected = { playlist ->
+                val result = mainViewModel.addSongToUserPlaylist(playlist.id, song)
+                android.widget.Toast.makeText(
+                    context,
+                    result.playerMessage(playlist.name),
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            },
+            onCreatePlaylist = { name ->
+                val playlistId = mainViewModel.createUserPlaylist(name)
+                val result = playlistId?.let { mainViewModel.addSongToUserPlaylist(it, song) }
+                    ?: PlaylistMutationResult.NOT_FOUND
+                android.widget.Toast.makeText(
+                    context,
+                    result.playerMessage(name),
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            }
+        )
+    }
+
+    onlineTrackToAdd?.let { track ->
+        AddToPlaylistDialog(
+            playlists = userPlaylists,
+            onDismiss = { onlineTrackToAdd = null },
+            onPlaylistSelected = { playlist ->
+                val result = mainViewModel.addOnlineTrackToUserPlaylist(playlist.id, track)
+                android.widget.Toast.makeText(
+                    context,
+                    result.playerMessage(playlist.name),
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            },
+            onCreatePlaylist = { name ->
+                val playlistId = mainViewModel.createUserPlaylist(name)
+                val result = playlistId?.let { mainViewModel.addOnlineTrackToUserPlaylist(it, track) }
+                    ?: PlaylistMutationResult.NOT_FOUND
+                android.widget.Toast.makeText(
+                    context,
+                    result.playerMessage(name),
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            }
+        )
     }
 
     when (bottomPanel) {
@@ -305,6 +367,12 @@ fun PlayerScreen(
 }
 
 private enum class PlayerBottomPanel { QUEUE, SLEEP, APPEARANCE }
+
+private fun PlaylistMutationResult.playerMessage(playlistName: String): String = when (this) {
+    PlaylistMutationResult.ADDED -> "已添加到“$playlistName”"
+    PlaylistMutationResult.ALREADY_EXISTS -> "歌曲已在“$playlistName”中"
+    PlaylistMutationResult.NOT_FOUND -> "歌单不存在，请重试"
+}
 
 @Composable
 private fun UnavailablePanel(
@@ -345,9 +413,11 @@ private fun PlayerTopBar(
     isLiked: Boolean,
     isLikeUpdating: Boolean,
     onLikeClick: () -> Unit,
+    onAddToPlaylistClick: () -> Unit,
     onAppearanceClick: () -> Unit,
     showSongInfo: Boolean,
     showFavorite: Boolean,
+    showAddToPlaylist: Boolean,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -355,22 +425,35 @@ private fun PlayerTopBar(
             .fillMaxWidth()
             .padding(top = 8.dp),
     ) {
-        IconButton(
-            onClick = onBack,
+        Row(
             modifier = Modifier
                 .align(Alignment.CenterStart)
-                .padding(start = 8.dp)
+                .padding(start = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                imageVector = androidx.compose.material.icons.Icons.Filled.KeyboardArrowDown,
-                contentDescription = "返回",
-                tint = TextPrimary,
-                modifier = Modifier.size(28.dp)
-            )
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = androidx.compose.material.icons.Icons.Filled.KeyboardArrowDown,
+                    contentDescription = "返回",
+                    tint = TextPrimary,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+            IconButton(onClick = onAppearanceClick) {
+                Icon(
+                    imageVector = androidx.compose.material.icons.Icons.Outlined.Tune,
+                    contentDescription = "播放页个性化",
+                    tint = TextPrimary,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
         }
         if (showSongInfo) {
             Column(
-                modifier = Modifier.align(Alignment.Center).padding(horizontal = 112.dp),
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .fillMaxWidth()
+                    .padding(horizontal = 112.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Row(
@@ -394,7 +477,10 @@ private fun PlayerTopBar(
                     onArtistClick = onArtistClick,
                     style = MaterialTheme.typography.labelMedium,
                     color = TextTertiary,
-                    modifier = Modifier.padding(top = 2.dp)
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 2.dp)
                 )
             }
         }
@@ -402,14 +488,6 @@ private fun PlayerTopBar(
             modifier = Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onAppearanceClick) {
-                Icon(
-                    imageVector = androidx.compose.material.icons.Icons.Outlined.Tune,
-                    contentDescription = "播放页个性化",
-                    tint = TextPrimary,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
             if (showFavorite) {
                 IconButton(onClick = onLikeClick, enabled = !isLikeUpdating) {
                     Icon(
@@ -417,6 +495,16 @@ private fun PlayerTopBar(
                         contentDescription = if (isLiked) "取消收藏" else "收藏",
                         tint = if (isLiked) RedAccent else TextPrimary,
                         modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+            if (showAddToPlaylist) {
+                IconButton(onClick = onAddToPlaylistClick) {
+                    Icon(
+                        imageVector = androidx.compose.material.icons.Icons.Outlined.Add,
+                        contentDescription = "添加到歌单",
+                        tint = TextPrimary,
+                        modifier = Modifier.size(26.dp)
                     )
                 }
             }
@@ -690,6 +778,8 @@ private fun rememberPlayerArtworkRequest(coverUrl: String?): ImageRequest? {
             .data(fullArtworkUrl)
             .size(700)
             .placeholderMemoryCacheKey(albumArtworkThumbnailCacheKey(coverUrl))
+            .memoryCachePolicy(CachePolicy.ENABLED)
+            .diskCachePolicy(CachePolicy.ENABLED)
             .crossfade(160)
             .build()
     }
@@ -979,20 +1069,14 @@ private fun PlayerControls(
     progress: Float,
     currentPosition: Long,
     duration: Long,
-    playMode: PlayMode,
     isPlaying: Boolean,
-    quality: PlaybackQuality,
-    qualityMenuExpanded: Boolean,
     showProgress: Boolean,
     showTransport: Boolean,
     showExtras: Boolean,
-    onQualityMenuExpandedChange: (Boolean) -> Unit,
-    onPlayModeClick: () -> Unit,
     onPrevClick: () -> Unit,
     onPlayPauseClick: () -> Unit,
     onNextClick: () -> Unit,
     onSeek: (Float) -> Unit,
-    onQualityClick: (PlaybackQuality) -> Unit,
     onQueueClick: () -> Unit,
     onSleepClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -1031,7 +1115,7 @@ private fun PlayerControls(
             )
         }
 
-        if (showTransport || showExtras) {
+        if (showTransport) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1039,92 +1123,35 @@ private fun PlayerControls(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (showExtras) {
-                    IconButton(onClick = onPlayModeClick) {
-                        Icon(
-                            imageVector = when (playMode) {
-                                PlayMode.SEQUENCE -> androidx.compose.material.icons.Icons.Outlined.Repeat
-                                PlayMode.SHUFFLE -> androidx.compose.material.icons.Icons.Outlined.Shuffle
-                                PlayMode.REPEAT_ONE -> androidx.compose.material.icons.Icons.Outlined.RepeatOne
-                            },
-                            contentDescription = "切换播放模式",
-                            tint = TextSecondary,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
+                IconButton(onClick = onPrevClick) {
+                    Icon(
+                        androidx.compose.material.icons.Icons.Filled.SkipPrevious,
+                        "上一首",
+                        tint = TextPrimary,
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
 
-                if (showTransport) {
-                    IconButton(onClick = onPrevClick) {
-                        Icon(
-                            androidx.compose.material.icons.Icons.Filled.SkipPrevious,
-                            "上一首",
-                            tint = TextPrimary,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = onPlayPauseClick,
-                        modifier = Modifier
-                            .size(64.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (isPlaying) androidx.compose.material.icons.Icons.Filled.Pause else androidx.compose.material.icons.Icons.Filled.PlayArrow,
-                            contentDescription = if (isPlaying) "暂停" else "播放",
-                            tint = Color.White,
-                            modifier = Modifier.size(32.dp)
-                        )
-                    }
-
-                    IconButton(onClick = onNextClick) {
-                        Icon(
-                            androidx.compose.material.icons.Icons.Filled.SkipNext,
-                            "下一首",
-                            tint = TextPrimary,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
+                IconButton(
+                    onClick = onPlayPauseClick,
+                    modifier = Modifier
+                        .size(64.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) androidx.compose.material.icons.Icons.Filled.Pause else androidx.compose.material.icons.Icons.Filled.PlayArrow,
+                        contentDescription = if (isPlaying) "暂停" else "播放",
+                        tint = Color.White,
+                        modifier = Modifier.size(32.dp)
+                    )
                 }
 
-                if (showExtras) {
-                    Box {
-                        IconButton(onClick = { onQualityMenuExpandedChange(true) }) {
-                            Icon(
-                                imageVector = androidx.compose.material.icons.Icons.Outlined.HighQuality,
-                                contentDescription = "选择音质",
-                                tint = TextSecondary,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                        DropdownMenu(
-                            expanded = qualityMenuExpanded,
-                            onDismissRequest = { onQualityMenuExpandedChange(false) },
-                            containerColor = GlassSurfaceStrong
-                        ) {
-                            PlaybackQuality.entries.forEach { item ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(
-                                                item.label,
-                                                style = MaterialTheme.typography.bodyMedium,
-                                                color = if (item == quality) Green500 else TextPrimary
-                                            )
-                                            if (item == quality) {
-                                                Spacer(modifier = Modifier.width(8.dp))
-                                                Text("当前", style = MaterialTheme.typography.labelSmall, color = Green500)
-                                            }
-                                        }
-                                    },
-                                    onClick = {
-                                        onQualityMenuExpandedChange(false)
-                                        onQualityClick(item)
-                                    }
-                                )
-                            }
-                        }
-                    }
+                IconButton(onClick = onNextClick) {
+                    Icon(
+                        androidx.compose.material.icons.Icons.Filled.SkipNext,
+                        "下一首",
+                        tint = TextPrimary,
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
             }
         }

@@ -6,6 +6,9 @@ import com.ncm.app.plugin.provider.MusicProvider
 interface PluginRuntime {
     fun providerFor(pluginId: String): MusicProvider?
 
+    /** All providers currently available for source-aware playlist playback. */
+    fun availableProviders(): List<MusicProvider> = emptyList()
+
     /** 装载插件脚本并返回其 MusicProvider（GC #11 两步检查由实现负责）。
      *  占位实现不支持；P3T8 的 QuickJsPluginRuntime 提供真实实现。 */
     fun load(pluginId: String, script: String, hostParams: Map<String, Any?>): MusicProvider =
@@ -25,6 +28,9 @@ class InMemoryPluginRuntime(
         if (destroyed) return null
         return providers[pluginId]
     }
+
+    override fun availableProviders(): List<MusicProvider> =
+        if (destroyed) emptyList() else providers.values.toList()
 
     override fun destroy() { destroyed = true }
 

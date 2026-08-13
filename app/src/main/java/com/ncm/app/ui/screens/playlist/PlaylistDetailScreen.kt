@@ -12,8 +12,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material.icons.outlined.Search
@@ -24,6 +26,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -43,8 +46,14 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.imageLoader
 import coil.compose.AsyncImage
+import com.ncm.app.plugin.model.pluginSourceDisplayName
 import coil.request.ImageRequest
+import com.ncm.app.data.FavoriteOrderStore
+import com.ncm.app.data.PlaylistMutationResult
+import com.ncm.app.data.isUserPlaylistId
 import com.ncm.app.data.model.Song
+import com.ncm.app.plugin.model.OnlineTrack
+import com.ncm.app.ui.components.AddToPlaylistDialog
 import com.ncm.app.ui.theme.*
 import com.ncm.app.util.albumArtworkThumbnailCacheKey
 import com.ncm.app.util.albumArtworkThumbnailUrl
@@ -52,20 +61,58 @@ import com.ncm.app.util.albumArtworkDisplayScale
 import com.ncm.app.util.sizedImageUrl
 import com.ncm.app.viewmodel.MainViewModel
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 
 private const val PLAYLIST_ARTWORK_PREFETCH_AHEAD = 6
 private const val PLAYLIST_ARTWORK_DECODE_SIZE_PX = 160
+
+private sealed interface PlaylistTrackRow {
+    val stableKey: String
+
+    data class Local(val song: Song) : PlaylistTrackRow {
+        override val stableKey: String = FavoriteOrderStore.localKey(song.id)
+    }
+
+    data class Online(val track: OnlineTrack) : PlaylistTrackRow {
+        override val stableKey: String = FavoriteOrderStore.onlineKey(track.key)
+    }
+}
+
+private fun orderedTrackRows(
+    songs: List<Song>,
+    onlineTracks: List<OnlineTrack>,
+    order: List<String>
+): List<PlaylistTrackRow> {
+    val rows = songs.map { PlaylistTrackRow.Local(it) } + onlineTracks.map { PlaylistTrackRow.Online(it) }
+    if (order.isEmpty()) return rows
+    val positions = order.withIndex().associate { it.value to it.index }
+    return rows.withIndex()
+        .sortedWith(
+            compareBy<IndexedValue<PlaylistTrackRow>> { positions[it.value.stableKey] ?: Int.MAX_VALUE }
+                .thenBy { it.index }
+        )
+        .map { it.value }
+}
 
 @Composable
 fun PlaylistDetailScreen(
     playlistId: Long,
     onSongClick: (Long) -> Unit,
+    onPluginSongClick: (OnlineTrack) -> Unit,
     onBack: () -> Unit,
     viewModel: MainViewModel = viewModel()
 ) {
     val state by viewModel.playlistState.collectAsState()
+    val myState by viewModel.myState.collectAsState()
+    val userPlaylists = remember(myState.playlists) {
+        myState.playlists.filter { isUserPlaylistId(it.id) }
+    }
     var isSearching by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
+    var songToAdd by remember { mutableStateOf<Song?>(null) }
+    var onlineTrackToAdd by remember { mutableStateOf<OnlineTrack?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
     val visibleSongs = remember(state.songs, searchQuery) {
         val query = searchQuery.trim()
         if (query.isBlank()) {
@@ -77,26 +124,45 @@ fun PlaylistDetailScreen(
             }
         }
     }
+    val visiblePluginTracks = remember(state.pluginTracks, searchQuery) {
+        val query = searchQuery.trim()
+        if (query.isBlank()) {
+            state.pluginTracks
+        } else {
+            state.pluginTracks.filter { track ->
+                track.title.contains(query, ignoreCase = true) ||
+                    track.artists.any { it.name.contains(query, ignoreCase = true) }
+            }
+        }
+    }
+    val visibleTracks = remember(visibleSongs, visiblePluginTracks, state.trackOrder) {
+        orderedTrackRows(visibleSongs, visiblePluginTracks, state.trackOrder)
+    }
+    val hasVisibleTracks = visibleTracks.isNotEmpty()
     val context = LocalContext.current
     val imageLoader = context.imageLoader
     val listState = rememberLazyListState()
 
     LaunchedEffect(playlistId) {
         viewModel.loadPlaylistDetail(playlistId)
+        viewModel.loadMyData()
     }
 
-    LaunchedEffect(playlistId, state.loadedPlaylistId, visibleSongs) {
+    LaunchedEffect(playlistId, state.loadedPlaylistId, visibleTracks) {
         if (state.loadedPlaylistId != playlistId) return@LaunchedEffect
         snapshotFlow {
-            listState.layoutInfo.visibleItemsInfo.mapNotNull { item -> item.key as? Long }
+            listState.layoutInfo.visibleItemsInfo.mapNotNull { item -> item.key as? String }
         }
             .distinctUntilChanged()
-            .collect { visibleSongIds ->
-                val lastVisibleSongIndex = visibleSongs.indexOfLast { song -> song.id in visibleSongIds }
-                visibleSongs
-                    .drop((lastVisibleSongIndex + 1).coerceAtLeast(0))
+            .collect { visibleTrackKeys ->
+                val lastVisibleTrackIndex = visibleTracks.indexOfLast { it.stableKey in visibleTrackKeys }
+                visibleTracks
+                    .drop((lastVisibleTrackIndex + 1).coerceAtLeast(0))
                     .take(PLAYLIST_ARTWORK_PREFETCH_AHEAD)
-                    .mapNotNull { song -> playlistArtworkRequest(context, song.album?.picUrl) }
+                    .mapNotNull { row ->
+                        (row as? PlaylistTrackRow.Local)?.song?.album?.picUrl
+                    }
+                    .mapNotNull { coverUrl -> playlistArtworkRequest(context, coverUrl) }
                     .forEach { request -> imageLoader.enqueue(request) }
             }
     }
@@ -114,7 +180,7 @@ fun PlaylistDetailScreen(
                 PlaylistHeader(
                     coverUrl = state.playlist?.cover,
                     title = state.playlist?.name ?: "歌单",
-                    count = state.playlist?.trackCount ?: state.songs.size,
+                    count = state.playlist?.trackCount ?: (state.songs.size + state.pluginTracks.size),
                     onBack = onBack,
                     isSearching = isSearching,
                     searchQuery = searchQuery,
@@ -135,8 +201,14 @@ fun PlaylistDetailScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Button(
-                        onClick = { visibleSongs.firstOrNull()?.let { onSongClick(it.id) } },
-                        enabled = visibleSongs.isNotEmpty(),
+                        onClick = {
+                            when (val first = visibleTracks.firstOrNull()) {
+                                is PlaylistTrackRow.Local -> onSongClick(first.song.id)
+                                is PlaylistTrackRow.Online -> onPluginSongClick(first.track)
+                                null -> Unit
+                            }
+                        },
+                        enabled = hasVisibleTracks,
                         shape = RoundedCornerShape(20.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
                         modifier = Modifier
@@ -155,7 +227,7 @@ fun PlaylistDetailScreen(
                 }
             }
 
-            if (state.isLoading && visibleSongs.isNotEmpty()) {
+            if (state.isLoading && hasVisibleTracks) {
                 item {
                     LinearProgressIndicator(
                         color = Green500,
@@ -167,7 +239,7 @@ fun PlaylistDetailScreen(
                 }
             }
 
-            if (state.isLoading && visibleSongs.isEmpty()) {
+            if (state.isLoading && !hasVisibleTracks) {
                 item {
                     Box(
                         modifier = Modifier
@@ -178,7 +250,7 @@ fun PlaylistDetailScreen(
                         CircularProgressIndicator(color = Green500)
                     }
                 }
-            } else if (visibleSongs.isEmpty()) {
+            } else if (!hasVisibleTracks) {
                 item {
                     Box(
                         modifier = Modifier
@@ -195,17 +267,91 @@ fun PlaylistDetailScreen(
                 }
             } else {
                 items(
-                    items = visibleSongs,
-                    key = { song -> song.id }
-                ) { song ->
-                    SongListItem(
-                        song = song,
-                        onClick = { onSongClick(song.id) },
-                        modifier = Modifier.padding(horizontal = 20.dp)
-                    )
+                    items = visibleTracks,
+                    key = PlaylistTrackRow::stableKey
+                ) { row ->
+                    when (row) {
+                        is PlaylistTrackRow.Local -> {
+                            val song = row.song
+                            SongListItem(
+                                song = song,
+                                onClick = { onSongClick(song.id) },
+                                onAddToPlaylist = { songToAdd = song },
+                                onRemoveFromPlaylist = if (isUserPlaylistId(playlistId)) {
+                                    {
+                                        if (viewModel.removeSongFromUserPlaylist(playlistId, song.id)) {
+                                            scope.launch { snackbarHostState.showSnackbar("已从歌单中移除") }
+                                        }
+                                    }
+                                } else {
+                                    null
+                                },
+                                modifier = Modifier.padding(horizontal = 20.dp)
+                            )
+                        }
+
+                        is PlaylistTrackRow.Online -> {
+                            val track = row.track
+                            OnlineTrackListItem(
+                                track = track,
+                                onClick = { onPluginSongClick(track) },
+                                onAddToPlaylist = { onlineTrackToAdd = track },
+                                onRemoveFromPlaylist = if (isUserPlaylistId(playlistId)) {
+                                    {
+                                        if (viewModel.removeOnlineTrackFromUserPlaylist(playlistId, track)) {
+                                            scope.launch { snackbarHostState.showSnackbar("已从歌单中移除") }
+                                        }
+                                    }
+                                } else {
+                                    null
+                                },
+                                modifier = Modifier.padding(horizontal = 20.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = miniPlayerSafeBottomPadding())
+        )
+    }
+
+    songToAdd?.let { song ->
+        AddToPlaylistDialog(
+            playlists = userPlaylists,
+            onDismiss = { songToAdd = null },
+            onPlaylistSelected = { playlist ->
+                val result = viewModel.addSongToUserPlaylist(playlist.id, song)
+                scope.launch { snackbarHostState.showSnackbar(result.messageFor(playlist.name)) }
+            },
+            onCreatePlaylist = { name ->
+                val playlistId = viewModel.createUserPlaylist(name)
+                val result = playlistId?.let { viewModel.addSongToUserPlaylist(it, song) }
+                    ?: PlaylistMutationResult.NOT_FOUND
+                scope.launch { snackbarHostState.showSnackbar(result.messageFor(name)) }
+            }
+        )
+    }
+
+    onlineTrackToAdd?.let { track ->
+        AddToPlaylistDialog(
+            playlists = userPlaylists,
+            onDismiss = { onlineTrackToAdd = null },
+            onPlaylistSelected = { playlist ->
+                val result = viewModel.addOnlineTrackToUserPlaylist(playlist.id, track)
+                scope.launch { snackbarHostState.showSnackbar(result.messageFor(playlist.name)) }
+            },
+            onCreatePlaylist = { name ->
+                val playlistId = viewModel.createUserPlaylist(name)
+                val result = playlistId?.let { viewModel.addOnlineTrackToUserPlaylist(it, track) }
+                    ?: PlaylistMutationResult.NOT_FOUND
+                scope.launch { snackbarHostState.showSnackbar(result.messageFor(name)) }
+            }
+        )
     }
 }
 
@@ -375,6 +521,8 @@ private fun PlaylistHeader(
 fun SongListItem(
     song: Song,
     onClick: () -> Unit,
+    onAddToPlaylist: (() -> Unit)? = null,
+    onRemoveFromPlaylist: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -441,15 +589,161 @@ fun SongListItem(
             Text(song.durationText, style = MaterialTheme.typography.bodySmall, color = TextTertiary)
         }
         Spacer(modifier = Modifier.width(12.dp))
+        PlaylistTrackMenu(
+            onAddToPlaylist = onAddToPlaylist,
+            onRemoveFromPlaylist = onRemoveFromPlaylist
+        )
+    }
+
+    HorizontalDivider(color = DarkBorder, thickness = 0.5.dp, modifier = modifier)
+}
+
+@Composable
+private fun OnlineTrackListItem(
+    track: OnlineTrack,
+    onClick: () -> Unit,
+    onAddToPlaylist: (() -> Unit)? = null,
+    onRemoveFromPlaylist: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val coverUrl = track.artworkUrl ?: track.album?.artworkUrl
+    val artworkRequest = remember(context, coverUrl) { playlistArtworkRequest(context, coverUrl) }
+    val artistText = track.artists.joinToString(" / ") { it.name }.ifBlank { "未知歌手" }
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(50.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(AccentSecondary.copy(alpha = 0.18f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = androidx.compose.material.icons.Icons.Outlined.MusicNote,
+                contentDescription = null,
+                tint = TextTertiary,
+                modifier = Modifier.size(22.dp)
+            )
+            artworkRequest?.let {
+                AsyncImage(
+                    model = it,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = track.title,
+                style = MaterialTheme.typography.titleMedium,
+                color = TextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "${pluginSourceDisplayName(track.key.pluginId)} · $artistText",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextTertiary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+        track.durationMs?.takeIf { it > 0L }?.let { duration ->
+            val totalSeconds = duration / 1_000L
+            Text(
+                text = "%d:%02d".format(totalSeconds / 60L, totalSeconds % 60L),
+                style = MaterialTheme.typography.bodySmall,
+                color = TextTertiary
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        PlaylistTrackMenu(
+            onAddToPlaylist = onAddToPlaylist,
+            onRemoveFromPlaylist = onRemoveFromPlaylist
+        )
+    }
+    HorizontalDivider(color = DarkBorder, thickness = 0.5.dp, modifier = modifier)
+}
+
+@Composable
+private fun PlaylistTrackMenu(
+    onAddToPlaylist: (() -> Unit)?,
+    onRemoveFromPlaylist: (() -> Unit)?
+) {
+    if (onAddToPlaylist == null && onRemoveFromPlaylist == null) {
         Icon(
             imageVector = androidx.compose.material.icons.Icons.Outlined.MoreVert,
             contentDescription = null,
             tint = TextTertiary,
             modifier = Modifier.size(18.dp)
         )
+        return
     }
 
-    HorizontalDivider(color = DarkBorder, thickness = 0.5.dp, modifier = modifier)
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(
+                imageVector = androidx.compose.material.icons.Icons.Outlined.MoreVert,
+                contentDescription = "歌曲操作",
+                tint = TextTertiary,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            containerColor = GlassSurfaceStrong
+        ) {
+            onAddToPlaylist?.let { action ->
+                DropdownMenuItem(
+                    text = { Text("添加到歌单", color = TextPrimary) },
+                    leadingIcon = {
+                        Icon(
+                            androidx.compose.material.icons.Icons.AutoMirrored.Outlined.PlaylistAdd,
+                            contentDescription = null,
+                            tint = Green500
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        action()
+                    }
+                )
+            }
+            onRemoveFromPlaylist?.let { action ->
+                DropdownMenuItem(
+                    text = { Text("从歌单中移除", color = MaterialTheme.colorScheme.error) },
+                    leadingIcon = {
+                        Icon(
+                            androidx.compose.material.icons.Icons.Outlined.DeleteOutline,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        action()
+                    }
+                )
+            }
+        }
+    }
+}
+
+private fun PlaylistMutationResult.messageFor(playlistName: String): String = when (this) {
+    PlaylistMutationResult.ADDED -> "已添加到“$playlistName”"
+    PlaylistMutationResult.ALREADY_EXISTS -> "歌曲已在“$playlistName”中"
+    PlaylistMutationResult.NOT_FOUND -> "歌单不存在，请重试"
 }
 
 private fun playlistArtworkRequest(context: Context, coverUrl: String?): ImageRequest? {

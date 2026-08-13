@@ -61,6 +61,7 @@ object AppPlayer {
     private var exoPlayer: ExoPlayer? = null
     private var mediaSession: MediaSession? = null
     private var linglanCacheDataSourceFactory: CacheDataSource.Factory? = null
+    private val notificationNavigation = PlaybackNavigationBridge()
     private var playbackServiceStarted = false
     private var currentSong: Song? = null
     private var currentSource: String = "netease"
@@ -246,10 +247,25 @@ object AppPlayer {
 
     fun mediaSession(context: Context): MediaSession {
         val appContext = context.applicationContext
-        return mediaSession ?: MediaSession.Builder(appContext, player(appContext))
+        return mediaSession ?: MediaSession.Builder(
+            appContext,
+            NotificationPlaybackPlayer(player(appContext), notificationNavigation)
+        )
             .setSessionActivity(openAppPendingIntent(appContext))
             .build()
             .also { mediaSession = it }
+    }
+
+    fun registerNotificationNavigation(
+        owner: Any,
+        onPrevious: () -> Unit,
+        onNext: () -> Unit
+    ) {
+        notificationNavigation.register(owner, onPrevious, onNext)
+    }
+
+    fun unregisterNotificationNavigation(owner: Any) {
+        notificationNavigation.unregister(owner)
     }
 
     fun mediaItem(

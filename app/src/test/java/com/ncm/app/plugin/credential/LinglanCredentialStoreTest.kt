@@ -32,6 +32,13 @@ class LinglanCredentialStoreTest {
     }
 
     @Test
+    fun naturalLanguageCannotBePersistedAsASecret() {
+        val store = LinglanCredentialStore(TestVault())
+        assertFalse(store.save("这是一段误粘贴的中文说明，不是密钥"))
+        assertNull(store.read())
+    }
+
+    @Test
     fun clearWipesSecretAndMask() {
         val store = LinglanCredentialStore(TestVault())
         store.save("secret-abc")

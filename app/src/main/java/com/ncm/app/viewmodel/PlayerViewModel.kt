@@ -8,6 +8,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import com.ncm.app.NeteaseApp
 import com.ncm.app.data.AppCache
+import com.ncm.app.data.FavoriteOrderStore
 import com.ncm.app.data.JianyunFavoriteStore
 import com.ncm.app.data.cache.LinglanCachePolicy
 import com.ncm.app.data.model.AlbumBrief
@@ -19,11 +20,16 @@ import com.ncm.app.data.model.withArtworkFrom
 import com.ncm.app.data.repository.JianyunOfficialContent
 import com.ncm.app.data.weekly.PlayEventEntity
 import com.ncm.app.playback.AppPlayer
+import com.ncm.app.plugin.model.OnlineTrack
+import com.ncm.app.plugin.model.ProviderTrackKey
+import com.ncm.app.plugin.model.pluginSourceDisplayName
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class PlayerUiState(
     val currentSong: Song? = null,
@@ -47,6 +53,25 @@ data class PlayerUiState(
     val error: String? = null
 )
 
+internal fun PlayerUiState.forPendingTrackSwitch(
+    song: Song?,
+    source: String
+): PlayerUiState = copy(
+    currentSong = song,
+    songUrl = null,
+    audioSource = source,
+    lyric = null,
+    tlyric = null,
+    duration = song?.dt ?: 0L,
+    isPlaying = false,
+    isLoading = true,
+    currentPosition = 0,
+    progress = 0f,
+    isLiked = false,
+    isLikeUpdating = false,
+    error = null
+)
+
 data class LinglanCacheUiState(
     val songCount: Int = 0,
     val sizeBytes: Long = 0,
@@ -54,6 +79,8 @@ data class LinglanCacheUiState(
     val isClearing: Boolean = false,
     val message: String? = null
 )
+
+internal fun isPluginPlaybackSource(source: String): Boolean = source.startsWith("plugin:")
 
 enum class PlayMode {
     SEQUENCE, SHUFFLE, REPEAT_ONE
@@ -91,6 +118,7 @@ class PlayerViewModel : ViewModel() {
     private val repo = app.repository
     private val session = app.session
     private val jianyunFavorites = JianyunFavoriteStore(app.cache) { session.userId }
+    private val favoriteOrderStore = FavoriteOrderStore(app.cache) { session.userId }
     private val _state = MutableStateFlow(PlayerUiState(quality = savedQuality()))
     val state: StateFlow<PlayerUiState> = _state
 
@@ -104,7 +132,11 @@ class PlayerViewModel : ViewModel() {
     private var sleepTimerJob: Job? = null
     private var queuePrefetchAnchorSongId: Long? = null
     private var transientBackupSongId: Long? = null
+    private var pendingPluginTrack: OnlineTrack? = null
+    private val pluginPlaybackQueue = PluginPlaybackQueue()
+    private val playlistPlaybackQueue = PlaylistPlaybackQueue()
     private val preparedQueueItems = mutableMapOf<Long, PreparedQueueItem>()
+    private val notificationNavigationOwner = Any()
 
     private val player = AppPlayer.player(app)
 
@@ -153,6 +185,10 @@ class PlayerViewModel : ViewModel() {
                 return
             }
             if (_state.value.currentSong?.id == songId) return
+            pendingPluginTrack = null
+            if (playlistPlaybackQueue.selectLocal(songId)) {
+                syncPlaylistQueueState()
+            }
             clearTransientBackupIfLeaving(songId)
             val prepared = preparedQueueItems[songId]
                 ?: playQueue.firstOrNull { it.id == songId }?.let { song ->
@@ -196,12 +232,17 @@ class PlayerViewModel : ViewModel() {
 
         override fun onPlayerError(error: PlaybackException) {
             Log.e(TAG, "playerError ${error.errorCodeName}", error)
-            // P6T1：播放失败只提示，不再自动切换聆澜/酷狗兜底源（GC #6）
+            // 已解析媒体在传输阶段失败时仍明确提示；解析阶段会先尝试严格匹配的混合来源。
             showPlaybackError(error)
         }
     }
 
     init {
+        AppPlayer.registerNotificationNavigation(
+            owner = notificationNavigationOwner,
+            onPrevious = ::playPrev,
+            onNext = ::playNext
+        )
         AppPlayer.mediaSession(app)
         player.addListener(playerListener)
         _state.value = _state.value.copy(history = loadHistory())
@@ -210,6 +251,10 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun play(songId: Long) {
+        pendingPluginTrack = null
+        if (playlistPlaybackQueue.selectLocal(songId)) {
+            syncPlaylistQueueState()
+        }
         val current = _state.value
         if (hasActiveMediaFor(songId)) {
             if (!player.isPlaying) player.play()
@@ -217,14 +262,17 @@ class PlayerViewModel : ViewModel() {
             return
         }
         if (current.currentSong?.id == songId && !current.songUrl.isNullOrBlank()) {
+            if (player.playbackState == Player.STATE_ENDED) player.seekTo(0)
             if (!player.isPlaying) player.play()
             return
         }
 
         val requestToken = ++playRequestToken
         playRequestJob?.cancel()
+        pauseCurrentPlaybackForTrackSwitch()
+        val queuedSong = playQueue.firstOrNull { it.id == songId }
+        _state.value = _state.value.forPendingTrackSwitch(queuedSong, PlaybackSource.NETEASE)
         playRequestJob = viewModelScope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
             repo.getSongDetail(listOf(songId)).onSuccess { songs ->
                 if (!isActivePlayRequest(requestToken)) return@onSuccess
                 val song = songs.firstOrNull()
@@ -274,53 +322,130 @@ class PlayerViewModel : ViewModel() {
      * 插件轨道播放（spec §4）：解析 → SSRF 校验 → 单曲入队播放。
      * 队列/喜欢/历史等 Song 主键能力不适用于插件轨道（阶段 5 迁移主键后统一）。
      */
-    fun playPluginTrack(track: com.ncm.app.plugin.model.OnlineTrack) {
+    fun playPluginTrack(track: OnlineTrack): Long {
+        if (playlistPlaybackQueue.isActive) {
+            playlistPlaybackQueue.selectOnline(track.key)
+            syncPlaylistQueueState()
+        } else {
+            if (!pluginPlaybackQueue.select(track)) {
+                pluginPlaybackQueue.set(listOf(track))
+            }
+            syncPluginQueueState()
+        }
+        val shellSong = pluginShellSong(track)
+        val source = "plugin:${track.key.pluginId}"
+        pendingPluginTrack = track
+        val requestToken = ++playRequestToken
         playRequestJob?.cancel()
+        pauseCurrentPlaybackForTrackSwitch()
+        _state.value = _state.value.forPendingTrackSwitch(shellSong, source)
+        refreshPluginLiked(track)
         playRequestJob = viewModelScope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
-            app.playbackResolver.resolve(track, pluginQualityLabel(_state.value.quality)).onSuccess { media ->
-                val shellSong = Song(
-                    id = 0L,
-                    name = track.title,
-                    artists = track.artists.map { ArtistBrief(0L, it.name) },
-                    album = track.album?.let { AlbumBrief(0L, it.name, it.artworkUrl) },
-                    dt = track.durationMs ?: 0L
+            val resolved = withContext(Dispatchers.IO) {
+                app.playbackResolver.resolveTrack(track, pluginQualityLabel(_state.value.quality))
+            }
+            resolved.onSuccess { playback ->
+                if (!isCurrentSongRequest(requestToken, shellSong.id)) return@onSuccess
+                val playedTrack = playback.track
+                val playedShellSong = pluginShellSong(playedTrack)
+                val playedSource = "plugin:${playedTrack.key.pluginId}"
+                val media = playback.media
+                pendingPluginTrack = playedTrack
+                if (playlistPlaybackQueue.isActive) {
+                    playlistPlaybackQueue.replaceSelected(track, playedTrack)
+                    syncPlaylistQueueState()
+                } else {
+                    pluginPlaybackQueue.replaceSelected(track, playedTrack)
+                    syncPluginQueueState()
+                }
+                val mediaItem = AppPlayer.pluginMediaItem(
+                    playedTrack,
+                    playedShellSong,
+                    media.url,
+                    media.headers,
+                    playedSource
                 )
-                val source = "plugin:${track.key.pluginId}"
-                val mediaItem = AppPlayer.pluginMediaItem(track, shellSong, media.url, media.headers, source)
                 player.stop()
                 player.setMediaItems(listOf(mediaItem))
                 player.prepare()
                 player.play()
                 AppPlayer.startPlaybackService(app)
-                AppPlayer.updateCurrentPlayback(shellSong, source)
-                AppPlayer.beginPlaybackSession(shellSong)
+                AppPlayer.updateCurrentPlayback(playedShellSong, playedSource)
+                AppPlayer.beginPlaybackSession(playedShellSong)
                 AppPlayer.refreshPlaybackNotification(app)
                 _state.value = _state.value.copy(
-                    currentSong = shellSong,
+                    currentSong = playedShellSong,
                     songUrl = media.url,
-                    audioSource = source,
-                    duration = shellSong.dt,
+                    audioSource = playedSource,
+                    duration = playedShellSong.dt,
                     isPlaying = true,
                     isLoading = false,
-                    error = null
+                    error = if (playback.usedFallback) {
+                        "原音源不可用，已切换至${pluginSourceDisplayName(playedTrack.key.pluginId)}"
+                    } else {
+                        null
+                    }
                 )
-                loadPluginLyric(track)
+                refreshPluginLiked(playedTrack)
+                app.onlinePlaybackHistoryStore.remember(playedTrack)
+                loadPluginLyric(playedTrack)
             }.onFailure { e ->
+                if (!isCurrentSongRequest(requestToken, shellSong.id)) return@onFailure
                 _state.value = _state.value.copy(isLoading = false, isPlaying = false, error = e.message)
             }
+        }
+        return shellSong.id
+    }
+
+    private fun pluginShellSong(track: OnlineTrack): Song = Song(
+        id = pluginShellSongId(track.key),
+        name = track.title,
+        artists = track.artists.map { ArtistBrief(0L, it.name) },
+        album = track.album?.let { AlbumBrief(0L, it.name, it.artworkUrl ?: track.artworkUrl) }
+            ?: track.artworkUrl?.let { AlbumBrief(0L, "", it) },
+        dt = track.durationMs ?: 0L
+    )
+
+    private fun syncPluginQueueState() {
+        playQueue = pluginPlaybackQueue.tracks.map(::pluginShellSong)
+        currentIndex = pluginPlaybackQueue.selectedIndex
+            .coerceIn(0, (playQueue.size - 1).coerceAtLeast(0))
+        _state.value = _state.value.copy(queue = playQueue)
+    }
+
+    private fun syncPlaylistQueueState() {
+        playQueue = playlistPlaybackQueue.entries.map { entry ->
+            when (entry) {
+                is PlaylistPlaybackEntry.Local -> entry.song
+                is PlaylistPlaybackEntry.Online -> pluginShellSong(entry.track)
+            }
+        }
+        currentIndex = playlistPlaybackQueue.selectedIndex
+            .coerceIn(0, (playQueue.size - 1).coerceAtLeast(0))
+        _state.value = _state.value.copy(queue = playQueue)
+    }
+
+    private fun playPlaylistEntry(entry: PlaylistPlaybackEntry) {
+        when (entry) {
+            is PlaylistPlaybackEntry.Local -> {
+                playlistPlaybackQueue.selectLocal(entry.song.id)
+                syncPlaylistQueueState()
+                play(entry.song.id)
+            }
+            is PlaylistPlaybackEntry.Online -> playPluginTrack(entry.track)
         }
     }
 
     private fun pluginQualityLabel(quality: PlaybackQuality): String? = when (quality) {
         PlaybackQuality.STANDARD -> "128k"
-        PlaybackQuality.HIGHER -> "192k"
+        PlaybackQuality.HIGHER -> "standard"
         PlaybackQuality.EXTREME -> "320k"
-        PlaybackQuality.LOSSLESS -> "999k"
+        PlaybackQuality.LOSSLESS -> "high"
     }
 
     fun open(songId: Long) {
         val current = _state.value
+        if (current.currentSong?.id == songId && isPluginPlaybackSource(current.audioSource)) return
         if (hasActiveMediaFor(songId)) {
             restoreFromActivePlayer()
             return
@@ -353,6 +478,20 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun playNext() {
+        if (playlistPlaybackQueue.isActive) {
+            playlistPlaybackQueue.next()?.let { entry ->
+                syncPlaylistQueueState()
+                playPlaylistEntry(entry)
+                return
+            }
+        }
+        if (isPluginPlaybackSource(_state.value.audioSource)) {
+            pluginPlaybackQueue.next()?.let { track ->
+                syncPluginQueueState()
+                playPluginTrack(track)
+                return
+            }
+        }
         if (playQueue.isEmpty()) {
             player.seekToNextMediaItem()
             AppPlayer.syncCurrentFromPlayer()
@@ -365,6 +504,20 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun playPrev() {
+        if (playlistPlaybackQueue.isActive) {
+            playlistPlaybackQueue.previous()?.let { entry ->
+                syncPlaylistQueueState()
+                playPlaylistEntry(entry)
+                return
+            }
+        }
+        if (isPluginPlaybackSource(_state.value.audioSource)) {
+            pluginPlaybackQueue.previous()?.let { track ->
+                syncPluginQueueState()
+                playPluginTrack(track)
+                return
+            }
+        }
         if (playQueue.isEmpty()) {
             player.seekToPreviousMediaItem()
             AppPlayer.syncCurrentFromPlayer()
@@ -389,12 +542,74 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun setQueue(songs: List<Song>, startIndex: Int = 0) {
+        playlistPlaybackQueue.clear()
+        pluginPlaybackQueue.set(emptyList())
         playQueue = songs
         currentIndex = startIndex.coerceIn(0, (songs.size - 1).coerceAtLeast(0))
         _state.value = _state.value.copy(queue = playQueue)
     }
 
+    fun setPluginQueue(tracks: List<OnlineTrack>, startIndex: Int = 0) {
+        playlistPlaybackQueue.clear()
+        pluginPlaybackQueue.set(tracks, startIndex)
+        preparedQueueItems.clear()
+        syncPluginQueueState()
+    }
+
+    fun setPlaylistQueue(
+        songs: List<Song>,
+        onlineTracks: List<OnlineTrack>,
+        order: List<String>,
+        startSongId: Long
+    ) {
+        setPlaylistQueue(
+            songs = songs,
+            onlineTracks = onlineTracks,
+            order = order,
+            selectedKey = FavoriteOrderStore.localKey(startSongId)
+        )
+    }
+
+    fun setPlaylistQueue(
+        songs: List<Song>,
+        onlineTracks: List<OnlineTrack>,
+        order: List<String>,
+        startTrack: OnlineTrack
+    ) {
+        setPlaylistQueue(
+            songs = songs,
+            onlineTracks = onlineTracks,
+            order = order,
+            selectedKey = FavoriteOrderStore.onlineKey(startTrack.key)
+        )
+    }
+
+    private fun setPlaylistQueue(
+        songs: List<Song>,
+        onlineTracks: List<OnlineTrack>,
+        order: List<String>,
+        selectedKey: String
+    ) {
+        pluginPlaybackQueue.set(emptyList())
+        preparedQueueItems.clear()
+        playlistPlaybackQueue.set(songs, onlineTracks, order, selectedKey)
+        keepOnlyCurrentMediaItem()
+        syncPlaylistQueueState()
+    }
+
     fun playFromQueue(songId: Long) {
+        val playlistEntry = playlistPlaybackQueue.entryForLocalSong(songId)
+            ?: playlistPlaybackQueue.entryForOnlineSongId(songId)
+        if (playlistEntry != null) {
+            playPlaylistEntry(playlistEntry)
+            return
+        }
+        pluginPlaybackQueue.trackForSongId(songId)?.let { track ->
+            pluginPlaybackQueue.select(track)
+            syncPluginQueueState()
+            playPluginTrack(track)
+            return
+        }
         val index = playQueue.indexOfFirst { it.id == songId }
         if (index < 0) return
         currentIndex = index
@@ -410,6 +625,26 @@ class PlayerViewModel : ViewModel() {
     fun removeFromQueue(songId: Long) {
         val index = playQueue.indexOfFirst { it.id == songId }
         if (index < 0 || _state.value.currentSong?.id == songId) return
+        if (playlistPlaybackQueue.isActive) {
+            val entry = playlistPlaybackQueue.entryForLocalSong(songId)
+                ?: playlistPlaybackQueue.entryForOnlineSongId(songId)
+                ?: return
+            playlistPlaybackQueue.remove(entry.stableKey)
+            syncPlaylistQueueState()
+            return
+        }
+        if (pluginPlaybackQueue.trackForSongId(songId) != null) {
+            val selectedKey = pluginPlaybackQueue.current()?.key
+            val remaining = pluginPlaybackQueue.tracks.filterNot {
+                pluginShellSongId(it.key) == songId
+            }
+            pluginPlaybackQueue.set(
+                remaining,
+                remaining.indexOfFirst { it.key == selectedKey }.coerceAtLeast(0)
+            )
+            syncPluginQueueState()
+            return
+        }
         playQueue = playQueue.filterNot { it.id == songId }
         if (index < currentIndex) currentIndex--
         currentIndex = currentIndex.coerceIn(0, (playQueue.size - 1).coerceAtLeast(0))
@@ -418,6 +653,19 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun clearQueue() {
+        if (playlistPlaybackQueue.isActive) {
+            playlistPlaybackQueue.retainCurrent()
+            preparedQueueItems.clear()
+            syncPlaylistQueueState()
+            return
+        }
+        if (isPluginPlaybackSource(_state.value.audioSource)) {
+            val currentTrack = pluginPlaybackQueue.current() ?: pendingPluginTrack
+            pluginPlaybackQueue.set(currentTrack?.let(::listOf).orEmpty())
+            preparedQueueItems.clear()
+            syncPluginQueueState()
+            return
+        }
         val current = _state.value.currentSong
         playQueue = current?.let(::listOf).orEmpty()
         currentIndex = 0
@@ -426,6 +674,11 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun enqueueNext(song: Song) {
+        if (playlistPlaybackQueue.isActive) {
+            playlistPlaybackQueue.enqueueNext(PlaylistPlaybackEntry.Local(song))
+            syncPlaylistQueueState()
+            return
+        }
         val current = _state.value.currentSong
         if (current == null) {
             setQueue(listOf(song))
@@ -525,8 +778,34 @@ class PlayerViewModel : ViewModel() {
 
         val targetLiked = !_state.value.isLiked
         _state.value = _state.value.copy(isLiked = targetLiked, isLikeUpdating = true, error = null)
+        currentPluginTrackForState()?.let { track ->
+            viewModelScope.launch {
+                runCatching { app.onlineFavoriteStore.setLiked(track, targetLiked) }
+                    .onSuccess {
+                        favoriteOrderStore.updateOnline(track.key, targetLiked)
+                        if (currentPluginTrackForState()?.key == track.key) {
+                            _state.value = _state.value.copy(
+                                isLiked = targetLiked,
+                                isLikeUpdating = false
+                            )
+                        }
+                        onChanged(song, targetLiked)
+                    }
+                    .onFailure { error ->
+                        if (currentPluginTrackForState()?.key == track.key) {
+                            _state.value = _state.value.copy(
+                                isLiked = !targetLiked,
+                                isLikeUpdating = false,
+                                error = "收藏失败：${error.message ?: "无法写入本地收藏"}"
+                            )
+                        }
+                    }
+            }
+            return
+        }
         if (JianyunOfficialContent.isOfficialSongId(songId)) {
             jianyunFavorites.update(song, targetLiked)
+            favoriteOrderStore.updateLocal(song.id, targetLiked)
             _state.value = _state.value.copy(isLiked = targetLiked, isLikeUpdating = false)
             onChanged(song, targetLiked)
             return
@@ -695,6 +974,30 @@ class PlayerViewModel : ViewModel() {
         _state.value = _state.value.copy(isLiked = false, isLikeUpdating = false)
     }
 
+    private fun currentPluginTrackForState(): OnlineTrack? {
+        val current = _state.value
+        if (!isPluginPlaybackSource(current.audioSource)) return null
+        val track = AppPlayer.currentPluginTrack() ?: pendingPluginTrack ?: return null
+        return track.takeIf { pluginShellSongId(it.key) == current.currentSong?.id }
+    }
+
+    /** Returns the source-owned track for the song currently shown on the player, when applicable. */
+    fun currentOnlineTrack(): OnlineTrack? = currentPluginTrackForState()
+
+    private fun refreshPluginLiked(track: OnlineTrack) {
+        val shellSongId = pluginShellSongId(track.key)
+        viewModelScope.launch {
+            val liked = runCatching { app.onlineFavoriteStore.isLiked(track.key) }.getOrDefault(false)
+            if (
+                _state.value.currentSong?.id == shellSongId &&
+                isPluginPlaybackSource(_state.value.audioSource) &&
+                !_state.value.isLikeUpdating
+            ) {
+                _state.value = _state.value.copy(isLiked = liked, isLikeUpdating = false)
+            }
+        }
+    }
+
     private fun isActivePlayRequest(requestToken: Long): Boolean {
         return requestToken == playRequestToken
     }
@@ -705,6 +1008,12 @@ class PlayerViewModel : ViewModel() {
 
     private fun playFromQueue(index: Int) {
         val song = playQueue.getOrNull(index) ?: return
+        pluginPlaybackQueue.trackForSongId(song.id)?.let { track ->
+            pluginPlaybackQueue.select(track)
+            syncPluginQueueState()
+            playPluginTrack(track)
+            return
+        }
         clearTransientBackupIfLeaving(song.id)
         val current = _state.value
         if (current.currentSong?.id == song.id && !current.songUrl.isNullOrBlank()) {
@@ -714,8 +1023,9 @@ class PlayerViewModel : ViewModel() {
 
         val requestToken = ++playRequestToken
         playRequestJob?.cancel()
+        pauseCurrentPlaybackForTrackSwitch()
+        _state.value = _state.value.forPendingTrackSwitch(song, PlaybackSource.NETEASE)
         playRequestJob = viewModelScope.launch {
-            _state.value = _state.value.copy(isLoading = true, error = null)
             delay(PLAY_REQUEST_DEBOUNCE_MS)
             if (!isActivePlayRequest(requestToken)) return@launch
             if (seekToQueuedSong(song.id)) {
@@ -734,10 +1044,11 @@ class PlayerViewModel : ViewModel() {
         val song = AppPlayer.currentSong() ?: return
         val url = player.currentMediaItem?.localConfiguration?.uri?.toString()
         if (url.isNullOrBlank()) return
+        val source = AppPlayer.sourceFor(player.currentMediaItem) ?: AppPlayer.currentSource()
         _state.value = _state.value.copy(
             currentSong = song,
             songUrl = url,
-            audioSource = AppPlayer.sourceFor(player.currentMediaItem) ?: AppPlayer.currentSource(),
+            audioSource = source,
             duration = player.duration.takeIf { it > 0 } ?: song.dt,
             isPlaying = player.isPlaying,
             isLoading = player.playbackState == Player.STATE_BUFFERING,
@@ -747,11 +1058,26 @@ class PlayerViewModel : ViewModel() {
             } ?: 0f,
             error = null
         )
+        val pluginTrack = AppPlayer.currentPluginTrack().takeIf { isPluginPlaybackSource(source) }
+        if (pluginTrack != null) {
+            pendingPluginTrack = pluginTrack
+            if (playlistPlaybackQueue.selectOnline(pluginTrack.key)) {
+                syncPlaylistQueueState()
+            }
+            refreshPluginLiked(pluginTrack)
+            app.onlinePlaybackHistoryStore.remember(pluginTrack)
+        } else {
+            pendingPluginTrack = null
+            if (playlistPlaybackQueue.selectLocal(song.id)) {
+                syncPlaylistQueueState()
+            }
+            refreshLiked(song.id)
+            rememberInHistory(song)
+        }
         playQueue.indexOfFirst { it.id == song.id }
             .takeIf { it >= 0 }
             ?.let { currentIndex = it }
         if (player.isPlaying) startProgressUpdates()
-        rememberInHistory(song)
     }
 
     private fun hasActiveMedia(): Boolean {
@@ -761,6 +1087,26 @@ class PlayerViewModel : ViewModel() {
     private fun hasActiveMediaFor(songId: Long): Boolean {
         val mediaId = player.currentMediaItem?.mediaId?.toLongOrNull()
         return mediaId == songId && hasActiveMedia()
+    }
+
+    /** Immediately freezes the old item before asynchronous resolution of the new one. */
+    private fun pauseCurrentPlaybackForTrackSwitch() {
+        bufferingFallbackJob?.cancel()
+        progressJob?.cancel()
+        if (player.isPlaying || player.playWhenReady) {
+            player.pause()
+        }
+    }
+
+    private fun keepOnlyCurrentMediaItem() {
+        val activeIndex = player.currentMediaItemIndex
+        if (activeIndex !in 0 until player.mediaItemCount) return
+        for (index in player.mediaItemCount - 1 downTo activeIndex + 1) {
+            player.removeMediaItem(index)
+        }
+        for (index in activeIndex - 1 downTo 0) {
+            player.removeMediaItem(index)
+        }
     }
 
     private suspend fun playKnownSong(song: Song, requestToken: Long) {
@@ -832,7 +1178,8 @@ class PlayerViewModel : ViewModel() {
             prepared.url,
             source = prepared.source,
             cacheKey = prepared.cacheKey,
-            reuseExistingQueue = playQueue.any { it.id == prepared.song.id }
+            reuseExistingQueue = !playlistPlaybackQueue.isActive &&
+                playQueue.any { it.id == prepared.song.id }
         )
         loadLyric(prepared.song.id)
     }
@@ -917,6 +1264,10 @@ class PlayerViewModel : ViewModel() {
     private fun syncPluginMediaItemState(mediaItem: MediaItem?) {
         AppPlayer.syncCurrentFromPlayer()
         val track = AppPlayer.currentPluginTrack() ?: return
+        pendingPluginTrack = track
+        if (playlistPlaybackQueue.selectOnline(track.key)) {
+            syncPlaylistQueueState()
+        }
         val shellSong = AppPlayer.currentSong() ?: return
         val source = AppPlayer.sourceFor(mediaItem) ?: "plugin:${track.key.pluginId}"
         _state.value = _state.value.copy(
@@ -928,12 +1279,17 @@ class PlayerViewModel : ViewModel() {
             tlyric = null,
             isPlaying = player.isPlaying,
             isLoading = false,
+            isLiked = false,
+            isLikeUpdating = false,
             error = null
         )
+        refreshPluginLiked(track)
+        app.onlinePlaybackHistoryStore.remember(track)
         loadPluginLyric(track)
     }
 
     private fun prefetchQueueAfter(songId: Long) {
+        if (playlistPlaybackQueue.isActive) return
         if (playQueue.size <= 1) return
         if (queuePrefetchJob?.isActive == true) {
             if (queuePrefetchAnchorSongId != songId) {
@@ -1164,6 +1520,7 @@ class PlayerViewModel : ViewModel() {
         cacheKey: String?
     ): List<MediaItem> {
         val mediaItems = mutableListOf(AppPlayer.mediaItem(song, url, source, cacheKey))
+        if (playlistPlaybackQueue.isActive) return mediaItems
         if (playQueue.isEmpty()) return mediaItems
 
         PlaybackQueuePlanner.windowAfter(
@@ -1191,6 +1548,7 @@ class PlayerViewModel : ViewModel() {
     }
 
     private fun appendPreparedQueue(currentSongId: Long) {
+        if (playlistPlaybackQueue.isActive) return
         if (playQueue.size <= 1) return
         val existingIds = (0 until player.mediaItemCount)
             .mapNotNull { player.getMediaItemAt(it).mediaId.toLongOrNull() }
@@ -1292,6 +1650,7 @@ class PlayerViewModel : ViewModel() {
     }
 
     override fun onCleared() {
+        AppPlayer.unregisterNotificationNavigation(notificationNavigationOwner)
         playRequestJob?.cancel()
         progressJob?.cancel()
         queuePrefetchJob?.cancel()

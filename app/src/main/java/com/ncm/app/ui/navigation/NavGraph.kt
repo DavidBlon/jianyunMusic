@@ -4,10 +4,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
+import android.content.Context
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -29,7 +27,6 @@ import com.ncm.app.ui.screens.search.SearchScreen
 import com.ncm.app.viewmodel.MainViewModel
 import com.ncm.app.viewmodel.OnlineMusicSourceViewModel
 import com.ncm.app.viewmodel.PlayerViewModel
-import com.ncm.app.viewmodel.sampleManifest
 
 object Routes {
     const val DISCOVER = "discover"
@@ -48,6 +45,56 @@ object Routes {
 /** 聆澜授权密钥的 Keystore 别名；对应文件 vault_linglan_auth.dat（已在备份排除规则中）。 */
 private const val LINGLAN_AUTH_ALIAS = "linglan_auth"
 
+
+/**
+ * 在 Activity 级创建在线来源状态机，使切换底部导航时不会销毁插件连接和恢复任务。
+ */
+fun createOnlineMusicSourceViewModel(context: Context): OnlineMusicSourceViewModel {
+    val appContext = context.applicationContext
+    val okHttpClient = okhttp3.OkHttpClient()
+    val apiRoot = BuildConfig.PAID_MUSIC_API_URL
+        .removeSuffix("/music")
+        .takeIf { it.startsWith("https://") }
+    val credentialStore = LinglanCredentialStore(
+        KeystoreSecretVault(appContext, LINGLAN_AUTH_ALIAS)
+    )
+    return OnlineMusicSourceViewModel(
+        manifestProvider = { emptyList() },
+        runtime = NeteaseApp.instance.pluginRuntime,
+        authClient = LinglanAuthClient(
+            endpoint = BuildConfig.PAID_MUSIC_API_URL
+                .trimEnd('/')
+                .takeIf { it.startsWith("https://") }
+                ?.let { "$it/url" }
+                ?: LinglanAuthClient.DEFAULT_ENDPOINT,
+            http = { url, secret ->
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "JianYunMusic/${BuildConfig.VERSION_NAME}")
+                    .header("X-API-Key", secret)
+                    .build()
+                okHttpClient.newCall(request).execute().use { it.body?.string() ?: "" }
+            }
+        ),
+        credentialStore = credentialStore,
+        settings = NeteaseApp.instance.onlineSourceSettings,
+        registry = NeteaseApp.instance.pluginRegistry,
+        manifestClient = LinglanManifestClient(
+            endpointTemplate = apiRoot?.let { "$it/script/mf.json" }
+                ?: LinglanManifestClient.DEFAULT_ENDPOINT_TEMPLATE,
+            http = { url ->
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "JianYunMusic/${BuildConfig.VERSION_NAME}")
+                    .build()
+                okHttpClient.newCall(request).execute().use { it.body?.string() ?: "" }
+            }
+        ),
+        legacyCredentialProvider = { NeteaseApp.instance.musicSourceSettings.cardKey.value },
+        clearMigratedLegacyCredential = NeteaseApp.instance.musicSourceSettings::clearCardKey
+    )
+}
+
 @Composable
 fun NavGraph(
     navController: NavHostController,
@@ -55,6 +102,7 @@ fun NavGraph(
     playerViewModel: PlayerViewModel,
     onOpenPlayer: (Long) -> Unit,
     onOpenPluginTrack: (com.ncm.app.plugin.model.OnlineTrack) -> Unit,
+    onlineSourceViewModel: OnlineMusicSourceViewModel,
     modifier: Modifier = Modifier
 ) {
     NavHost(
@@ -69,8 +117,15 @@ fun NavGraph(
         composable(Routes.DISCOVER) {
             DiscoverScreen(
                 onPlaylistClick = { id -> navController.navigate(Routes.playlistDetail(id)) },
-                onSongClick = onOpenPlayer,
-                onSearchClick = { navController.navigate(Routes.SEARCH) },
+                onPluginSongClick = { track ->
+                    mainViewModel.discoverState.value.recommendedSongs.let { tracks ->
+                        playerViewModel.setPluginQueue(
+                            tracks,
+                            tracks.indexOfFirst { it.key == track.key }.coerceAtLeast(0)
+                        )
+                    }
+                    onOpenPluginTrack(track)
+                },
                 viewModel = mainViewModel
             )
         }
@@ -83,11 +138,24 @@ fun NavGraph(
             PlaylistDetailScreen(
                 playlistId = playlistId,
                 onSongClick = { id ->
-                    mainViewModel.playlistState.value.songs.let { songs ->
-                        val startIndex = songs.indexOfFirst { it.id == id }.coerceAtLeast(0)
-                        playerViewModel.setQueue(songs, startIndex)
-                    }
+                    val playlist = mainViewModel.playlistState.value
+                    playerViewModel.setPlaylistQueue(
+                        songs = playlist.songs,
+                        onlineTracks = playlist.pluginTracks,
+                        order = playlist.trackOrder,
+                        startSongId = id
+                    )
                     onOpenPlayer(id)
+                },
+                onPluginSongClick = { track ->
+                    val playlist = mainViewModel.playlistState.value
+                    playerViewModel.setPlaylistQueue(
+                        songs = playlist.songs,
+                        onlineTracks = playlist.pluginTracks,
+                        order = playlist.trackOrder,
+                        startTrack = track
+                    )
+                    onOpenPluginTrack(track)
                 },
                 onBack = { navController.popBackStack() },
                 viewModel = mainViewModel
@@ -136,6 +204,12 @@ fun NavGraph(
                     onOpenPlayer(id)
                 },
                 onPluginSongClick = { track ->
+                    mainViewModel.searchState.value.pluginResults.let { tracks ->
+                        playerViewModel.setPluginQueue(
+                            tracks,
+                            tracks.indexOfFirst { it.key == track.key }.coerceAtLeast(0)
+                        )
+                    }
                     onOpenPluginTrack(track)
                 },
                 onArtistClick = { artistId ->
@@ -147,59 +221,11 @@ fun NavGraph(
         }
 
         composable(Routes.MY) {
-            val context = LocalContext.current
-            val okHttpClient = remember { okhttp3.OkHttpClient() }
-            val onlineSourceViewModel: OnlineMusicSourceViewModel = viewModel {
-                OnlineMusicSourceViewModel(
-                    // 阶段 2 占位清单提供者；manifestClient 注入后 connect 成功即走真实清单
-                    manifestProvider = { sampleManifest() },
-                    runtime = NeteaseApp.instance.pluginRuntime,
-                    authClient = LinglanAuthClient(
-                        endpoint = BuildConfig.PAID_MUSIC_API_URL
-                            .removeSuffix("/music")
-                            .takeIf { it.startsWith("https://") }
-                            ?.let { "$it/script?checkUpdate=jiany-music-android" }
-                            ?: LinglanAuthClient.DEFAULT_ENDPOINT,
-                        http = { url, secret ->
-                            // 密钥经请求头传递，不进查询参数（GC #4 / spec §8.3）
-                            val request = okhttp3.Request.Builder()
-                                .url(url)
-                                .header("X-API-Key", secret)
-                                .header("User-Agent", "JianYunMusic/${BuildConfig.VERSION_NAME}")
-                                .build()
-                            okHttpClient.newCall(request).execute().use { it.body?.string() ?: "" }
-                        }
-                    ),
-                    credentialStore = LinglanCredentialStore(
-                        KeystoreSecretVault(context.applicationContext, LINGLAN_AUTH_ALIAS)
-                    ),
-                    settings = MusicSourceSettings(context.applicationContext),
-                    registry = NeteaseApp.instance.pluginRegistry,
-                    manifestClient = LinglanManifestClient(
-                        endpointTemplate = BuildConfig.PAID_MUSIC_API_URL
-                            .removeSuffix("/music")
-                            .takeIf { it.startsWith("https://") }
-                            ?.let { "$it/script/mf.json?key=" }
-                            ?: LinglanManifestClient.DEFAULT_ENDPOINT_TEMPLATE,
-                        http = { url ->
-                            // 清单 URL 含密钥查询参数（聆澜现状，spec §8.3 过渡）：仅内存使用，
-                            // 不持久化；响应体不落日志
-                            val request = okhttp3.Request.Builder()
-                                .url(url)
-                                .header("User-Agent", "JianYunMusic/${BuildConfig.VERSION_NAME}")
-                                .build()
-                            okHttpClient.newCall(request).execute().use { it.body?.string() ?: "" }
-                        }
-                    )
-                )
-            }
             MyScreen(
                 onPlaylistClick = { id -> navController.navigate(Routes.playlistDetail(id)) },
-                onSongClick = onOpenPlayer,
                 onDisclaimerClick = {
                     navController.navigate(Routes.DISCLAIMER)
                 },
-                playerViewModel = playerViewModel,
                 viewModel = mainViewModel,
                 onlineSourceViewModel = onlineSourceViewModel
             )

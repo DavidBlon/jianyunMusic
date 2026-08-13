@@ -27,11 +27,16 @@ class MusicProviderContractTest {
     @Test
     fun optionalCapabilitiesDefaultToUnsupported() = kotlinx.coroutines.test.runTest {
         val fake = FakeMusicProvider()
+        val track = OnlineTrack(key = com.ncm.app.plugin.model.ProviderTrackKey("fake", "1"), producedByPluginVersion = "1", payloadSchemaVersion = 1, title = "t", artists = emptyList(), album = null, durationMs = null, artworkUrl = null, pluginPayload = com.ncm.app.plugin.model.BoundedJsonObject.fromMap(emptyMap()))
+        assertEquals(false, fake.supportsTrackInfo())
         assertEquals(false, fake.supportsAlbumInfo())
         assertEquals(false, fake.supportsArtistWorks())
         assertEquals(false, fake.supportsMusicSheet())
+        assertEquals(false, fake.supportsRecommendedSheets())
         assertEquals(false, fake.supportsTopLists())
-        assertTrue(fake.albumInfo(OnlineTrack(key = com.ncm.app.plugin.model.ProviderTrackKey("fake", "1"), producedByPluginVersion = "1", payloadSchemaVersion = 1, title = "t", artists = emptyList(), album = null, durationMs = null, artworkUrl = null, pluginPayload = com.ncm.app.plugin.model.BoundedJsonObject.fromMap(emptyMap())), page = 1).isEmpty())
+        assertEquals(null, fake.trackInfo(track))
+        assertTrue(fake.albumInfo(track, page = 1).isEmpty())
+        assertTrue(fake.recommendedSheets(page = 1).items.isEmpty())
     }
 
     private class FakeMusicProvider : MusicProvider {

@@ -26,11 +26,4 @@ class SessionGenerationTest {
         manager.invalidate()
         assertEquals(2, manager.sessionGeneration)
     }
-
-    @Test
-    fun saveLoginInfoIncrementsGeneration() {
-        val manager = newManager()
-        manager.saveLoginInfo(1L, "n", null, 0)
-        assertEquals(1, manager.sessionGeneration)
-    }
 }

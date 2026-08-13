@@ -1,6 +1,7 @@
 package com.ncm.app.plugin.provider
 
 import com.ncm.app.plugin.model.OnlineTrack
+import com.ncm.app.plugin.model.OnlinePlaylist
 import com.ncm.app.plugin.model.ResolvedMedia
 
 /** 统一在线来源接口。所有实现都必须以 [pluginId] 标识自己，禁止在 Repository 中出现平台名判断（GC #6）。 */
@@ -13,6 +14,9 @@ interface MusicProvider {
 
     // ---- 可选能力：默认不支持，UI 靠 supportsXxx 隐藏入口（GC #13，spec §6.2）----
 
+    fun supportsTrackInfo(): Boolean = false
+    suspend fun trackInfo(track: OnlineTrack): OnlineTrack? = null
+
     fun supportsAlbumInfo(): Boolean = false
     suspend fun albumInfo(track: OnlineTrack, page: Int): List<OnlineTrack> = emptyList()
 
@@ -22,12 +26,17 @@ interface MusicProvider {
     fun supportsMusicSheet(): Boolean = false
     suspend fun musicSheetInfo(sheet: Any, page: Int): List<OnlineTrack> = emptyList()
 
+    fun supportsRecommendedSheets(): Boolean = false
+    suspend fun recommendedSheets(page: Int): PlaylistOutcome = PlaylistOutcome(emptyList(), isEnd = true)
+
     fun supportsTopLists(): Boolean = false
     suspend fun topLists(): List<Any> = emptyList()
     suspend fun topListDetail(topList: Any): List<OnlineTrack> = emptyList()
 }
 
 data class SearchOutcome(val items: List<OnlineTrack>, val isEnd: Boolean)
+
+data class PlaylistOutcome(val items: List<OnlinePlaylist>, val isEnd: Boolean)
 
 data class LyricOutcome(
     val rawLrc: String?,

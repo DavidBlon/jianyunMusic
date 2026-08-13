@@ -77,4 +77,16 @@ class LinglanManifestClientTest {
         client.fetch("CERU_KEY-abc")
         assertEquals("https://example.test/mf.json?key=CERU_KEY-abc", requestedUrl)
     }
+
+    @Test
+    fun requestUrlEncodesReservedCharactersInSecret() {
+        val client = LinglanManifestClient(
+            endpointTemplate = "https://example.test/mf.json?key=",
+            http = { "{\"plugins\":[]}" }
+        )
+        assertEquals(
+            "https://example.test/mf.json?key=a%2Bb%26c%3Dd",
+            client.requestUrl("a+b&c=d")
+        )
+    }
 }

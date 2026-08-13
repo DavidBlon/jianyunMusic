@@ -2,6 +2,7 @@ package com.ncm.app
 
 import android.app.Application
 import android.content.Context
+import android.os.Build
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
@@ -12,7 +13,9 @@ import com.ncm.app.data.cache.COVER_IMAGE_CACHE_MAX_BYTES
 import com.ncm.app.data.cache.LinglanAudioCache
 import com.ncm.app.data.cache.coverImageCacheDirectory
 import com.ncm.app.data.repository.MusicRepository
-import com.ncm.app.data.repository.MusicSourceKeyValidator
+import com.ncm.app.data.store.OnlineFavoriteStore
+import com.ncm.app.data.store.OnlineLibraryDatabase
+import com.ncm.app.data.store.OnlinePlaybackHistoryStore
 import com.ncm.app.data.weekly.WeeklyCacheCleaner
 import com.ncm.app.data.weekly.WeeklyPlayLog
 import com.ncm.app.data.weekly.WeeklyRecommendationStore
@@ -22,8 +25,12 @@ import com.ncm.app.plugin.PlaybackResolver
 import com.ncm.app.plugin.PluginSearchService
 import com.ncm.app.plugin.credential.KeystoreSecretVault
 import com.ncm.app.plugin.credential.LinglanCredentialStore
+import com.ncm.app.plugin.manifest.DEFAULT_SOURCE_ALLOW_RULES
+import com.ncm.app.plugin.manifest.LinglanManifestClient
+import com.ncm.app.plugin.manifest.allowedManifestItems
 import com.ncm.app.plugin.registry.PluginRegistry
 import com.ncm.app.plugin.registry.RegistryPluginRuntime
+import com.ncm.app.plugin.runtime.AuthorizedPluginHttpExecutor
 import com.ncm.app.plugin.runtime.ControlledHttpBridge
 import com.ncm.app.plugin.runtime.HttpExecutor
 import com.ncm.app.plugin.runtime.HttpRequestSpec
@@ -33,6 +40,7 @@ import com.ncm.app.plugin.runtime.PluginScriptCache
 import com.ncm.app.plugin.runtime.QuickJsPluginRuntime
 import com.ncm.app.plugin.security.ManifestSignatureVerifier
 import com.ncm.app.plugin.security.SsrfGuard
+import com.whl.quickjs.android.QuickJSLoader
 import com.ncm.app.ui.theme.AccentThemeSettings
 import com.ncm.app.ui.theme.PlayerAppearanceSettings
 import kotlinx.coroutines.CoroutineScope
@@ -65,8 +73,6 @@ class NeteaseApp : Application(), ImageLoaderFactory {
         private set
     lateinit var musicSourceSettings: MusicSourceSettings
         private set
-    lateinit var musicSourceKeyValidator: MusicSourceKeyValidator
-        private set
     lateinit var linglanAudioCache: LinglanAudioCache
         private set
     lateinit var accentThemeSettings: AccentThemeSettings
@@ -80,6 +86,10 @@ class NeteaseApp : Application(), ImageLoaderFactory {
     lateinit var generateWeeklyRecommendationUseCase: GenerateWeeklyRecommendationUseCase
         private set
     lateinit var weeklyCacheCleaner: WeeklyCacheCleaner
+        private set
+    lateinit var onlineFavoriteStore: OnlineFavoriteStore
+        private set
+    lateinit var onlinePlaybackHistoryStore: OnlinePlaybackHistoryStore
         private set
 
     // ---- 插件宿主（阶段 4 组装；阶段 6 由 PluginRegistry + QuickJsPluginRuntime 驱动）----
@@ -99,10 +109,10 @@ class NeteaseApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        initializeQuickJsNativeOnMainThread()
         session = SessionManager(this)
         cache = AppCache(this)
         musicSourceSettings = MusicSourceSettings(this)
-        musicSourceKeyValidator = MusicSourceKeyValidator()
         linglanAudioCache = LinglanAudioCache(this)
         accentThemeSettings = AccentThemeSettings(this)
         playerAppearanceSettings = PlayerAppearanceSettings(this)
@@ -110,11 +120,26 @@ class NeteaseApp : Application(), ImageLoaderFactory {
         cache.removePrefix(AppCache.KEY_QUICK_PREFIX)
         cache.remove(AppCache.KEY_DISCOVER)
         cache.remove(AppCache.KEY_MY)
+        onlineFavoriteStore = OnlineFavoriteStore(OnlineLibraryDatabase.get(this).onlineSongDao())
+        onlinePlaybackHistoryStore = OnlinePlaybackHistoryStore(
+            cache = cache,
+            currentUserId = { session.userId }
+        )
         initPluginHost()
         initWeeklyRecommendation()
         applicationScope.launch {
             weeklyCacheCleaner.cleanupOnAppStart(session.userId)
         }
+    }
+
+    /**
+     * wrapper-android must perform its first native-library load on Android's main thread.
+     * Plugin execution itself stays on a dedicated worker; first loading there makes JS object
+     * creation fail. Robolectric/JVM has no Android ELF library, so leave that environment alone.
+     */
+    private fun initializeQuickJsNativeOnMainThread() {
+        if (Build.FINGERPRINT.contains("robolectric", ignoreCase = true)) return
+        QuickJSLoader.init()
     }
 
     override fun newImageLoader(): ImageLoader {
@@ -156,16 +181,47 @@ class NeteaseApp : Application(), ImageLoaderFactory {
                 )
             }
         }
+        val credentialStore = LinglanCredentialStore(
+            KeystoreSecretVault(this, LINGLAN_AUTH_ALIAS)
+        )
+        val manifestApiRoot = BuildConfig.PAID_MUSIC_API_URL
+            .removeSuffix("/music")
+            .takeIf { it.startsWith("https://") }
+        val onDemandManifestClient = LinglanManifestClient(
+            endpointTemplate = manifestApiRoot?.let { "$it/script/mf.json" }
+                ?: LinglanManifestClient.DEFAULT_ENDPOINT_TEMPLATE,
+            http = { url ->
+                val request = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "JianYunMusic/${BuildConfig.VERSION_NAME}")
+                    .build()
+                pluginHttp.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw IOException("来源列表获取失败：HTTP ${response.code}")
+                    }
+                    response.body?.string().orEmpty()
+                }
+            }
+        )
+        val authorizedPluginHttpExecutor = AuthorizedPluginHttpExecutor(
+            authorizedApiBaseUrl = BuildConfig.PAID_MUSIC_API_URL,
+            credentialProvider = credentialStore::read,
+            delegate = pluginHttpExecutor
+        )
         pluginHttpBridge = ControlledHttpBridge(
-            ssrfGuard = SsrfGuard(),
-            executor = pluginHttpExecutor
+            // MusicFree providers still use public HTTP endpoints for lyrics and metadata.
+            // Private/literal addresses and restricted ports remain blocked by SsrfGuard;
+            // resolved media playback keeps the stricter HTTPS-only guard below.
+            ssrfGuard = SsrfGuard(allowHttpsOnly = false),
+            executor = authorizedPluginHttpExecutor::execute
         )
 
         // 脚本缓存键 = 用户授权身份的不可逆摘要（GC #10）：从 Keystore 密钥派生，绝不用原始密钥
         val identityDigest = runCatching {
-            val secret = LinglanCredentialStore(
-                KeystoreSecretVault(this, LINGLAN_AUTH_ALIAS)
-            ).read().orEmpty()
+            // During the one-time legacy migration the credential has not reached Keystore
+            // yet. Hashing the legacy value keeps the cache identity stable across restart.
+            val secret = credentialStore.read().orEmpty()
+                .ifBlank { musicSourceSettings.cardKey.value }
             ManifestSignatureVerifier.sha256Hex(secret.ifBlank { "anonymous" })
         }.getOrDefault(ManifestSignatureVerifier.sha256Hex("anonymous"))
         val scriptCache = PluginScriptCache(
@@ -175,7 +231,7 @@ class NeteaseApp : Application(), ImageLoaderFactory {
         pluginRegistry = PluginRegistry(
             runtimeFactory = { pluginId, script, hostParams ->
                 // 真实调用阶段使用受控 HTTP 桥（SSRF 前置校验），插件 axios 请求走桥
-                QuickJsPluginRuntime(pluginId, script, hostParams, httpExecutor = pluginHttpExecutor)
+                QuickJsPluginRuntime(pluginId, script, hostParams, httpExecutor = pluginHttpBridge::execute)
             },
             downloader = { url ->
                 val request = Request.Builder().url(url).get().build()
@@ -194,7 +250,23 @@ class NeteaseApp : Application(), ImageLoaderFactory {
         )
 
         pluginRuntime = RegistryPluginRuntime(pluginRegistry)
-        playbackResolver = PlaybackResolver(pluginRuntime, SsrfGuard())
+        // Some provider CDNs still return public HTTP media URLs. Keep private/literal
+        // addresses and restricted ports blocked while allowing the exact resolved stream.
+        playbackResolver = PlaybackResolver(
+            runtime = pluginRuntime,
+            ssrfGuard = SsrfGuard(allowHttpsOnly = false),
+            restoreProvider = { pluginId -> pluginRegistry.restore(pluginId).getOrNull() },
+            installProvider = installProvider@ { pluginId ->
+                val secret = credentialStore.read().orEmpty()
+                    .ifBlank { musicSourceSettings.cardKey.value }
+                if (secret.isBlank()) return@installProvider null
+                val item = allowedManifestItems(
+                    onDemandManifestClient.fetch(secret),
+                    DEFAULT_SOURCE_ALLOW_RULES
+                ).firstOrNull { it.id == pluginId } ?: return@installProvider null
+                pluginRegistry.install(item).getOrNull()
+            }
+        )
         pluginSearchService = PluginSearchService(pluginRuntime) { onlineSourceSettings.currentPluginId }
         repository = MusicRepository(pluginSearchService)
     }

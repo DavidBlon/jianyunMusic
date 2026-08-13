@@ -13,6 +13,14 @@ class SsrfGuardTest {
     }
 
     @Test
+    fun compatibilityModeAllowsPublicHttpButStillBlocksPrivateTargets() {
+        val guard = SsrfGuard(allowHttpsOnly = false)
+        assertTrue(guard.validate("http://lyrics.kugou.com/search").isAllow)
+        assertTrue(guard.validate("http://127.0.0.1/admin").isDeny)
+        assertTrue(guard.validate("http://192.168.1.5/admin").isDeny)
+    }
+
+    @Test
     fun deniesNonHttpProtocols() {
         val guard = SsrfGuard()
         val denials = listOf(

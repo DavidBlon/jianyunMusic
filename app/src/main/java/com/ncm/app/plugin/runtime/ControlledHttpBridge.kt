@@ -37,7 +37,13 @@ class ControlledHttpBridge(
     }
 
     private suspend fun executeWithRedirects(spec: HttpRequestSpec, remaining: Int): HttpResult {
-        val result = executor(spec)
+        // OkHttp transparently advertises and decodes gzip only when callers do not set
+        // Accept-Encoding themselves. Provider scripts frequently set it, which otherwise
+        // exposes compressed bytes to the JS JSON parser.
+        val transportSpec = spec.copy(
+            headers = spec.headers.filterKeys { !it.equals("Accept-Encoding", ignoreCase = true) }
+        )
+        val result = executor(transportSpec)
         if (result.data.size > maxResponseBytes) throw IllegalStateException("response body too large")
         if (!isRedirect(result.status) || remaining <= 0) return result
         val location = result.headers["location"] ?: return result
@@ -46,7 +52,7 @@ class ControlledHttpBridge(
         if (redirectDecision is SsrfDecision.Deny) {
             throw IllegalStateException("blocked redirect: ${redirectDecision.reason}")
         }
-        return executeWithRedirects(spec.copy(url = nextUrl, body = null), remaining - 1)
+        return executeWithRedirects(transportSpec.copy(url = nextUrl, body = null), remaining - 1)
     }
 
     private fun isRedirect(status: Int): Boolean = status in setOf(301, 302, 303, 307, 308)

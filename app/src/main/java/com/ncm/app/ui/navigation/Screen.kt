@@ -16,7 +16,6 @@ sealed class Screen(val route: String) {
     }
     data object My : Screen("my")
     data object Disclaimer : Screen("disclaimer")
-    data object Login : Screen("login")
 }
 
 enum class BottomNavItem(

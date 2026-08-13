@@ -67,4 +67,27 @@ class ControlledHttpBridgeTest {
         val result = bridge.execute(HttpRequestSpec("https://a.example/song", "GET", emptyMap()))
         assertEquals(200, result.status)
     }
+
+    @Test
+    fun responseCompressionIsOwnedByHostTransport() = runTest {
+        var forwarded: HttpRequestSpec? = null
+        val bridge = ControlledHttpBridge(
+            ssrfGuard = guard,
+            executor = { spec ->
+                forwarded = spec
+                HttpResult(200, emptyMap(), "ok".toByteArray())
+            }
+        )
+
+        bridge.execute(
+            HttpRequestSpec(
+                "https://songsearch.kugou.com/search",
+                "GET",
+                mapOf("Accept-Encoding" to "gzip, deflate", "Accept" to "application/json")
+            )
+        )
+
+        assertEquals(null, forwarded?.headers?.keys?.firstOrNull { it.equals("Accept-Encoding", true) })
+        assertEquals("application/json", forwarded?.headers?.get("Accept"))
+    }
 }
