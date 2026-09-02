@@ -82,10 +82,11 @@ fun createOnlineMusicSourceViewModel(context: Context): OnlineMusicSourceViewMod
         manifestClient = LinglanManifestClient(
             endpointTemplate = apiRoot?.let { "$it/script/mf.json" }
                 ?: LinglanManifestClient.DEFAULT_ENDPOINT_TEMPLATE,
-            http = { url ->
+            http = { url, secret ->
                 val request = okhttp3.Request.Builder()
                     .url(url)
                     .header("User-Agent", "JianYunMusic/${BuildConfig.VERSION_NAME}")
+                    .header("X-API-Key", secret)
                     .build()
                 okHttpClient.newCall(request).execute().use { it.body?.string() ?: "" }
             }
@@ -114,11 +115,21 @@ fun NavGraph(
         popEnterTransition = { fadeIn(animationSpec = tween(250)) },
         popExitTransition = { fadeOut(animationSpec = tween(250)) }
     ) {
-        composable(Routes.DISCOVER) {
+composable(Routes.DISCOVER) {
             DiscoverScreen(
                 onPlaylistClick = { id -> navController.navigate(Routes.playlistDetail(id)) },
                 onPluginSongClick = { track ->
                     mainViewModel.discoverState.value.recommendedSongs.let { tracks ->
+                        playerViewModel.setPluginQueue(
+                            tracks,
+                            tracks.indexOfFirst { it.key == track.key }.coerceAtLeast(0)
+                        )
+                    }
+                    onOpenPluginTrack(track)
+                },
+                onSearchClick = { navController.navigate(Routes.SEARCH) },
+                onRecentSongClick = { track ->
+                    mainViewModel.discoverState.value.recentTracks.let { tracks ->
                         playerViewModel.setPluginQueue(
                             tracks,
                             tracks.indexOfFirst { it.key == track.key }.coerceAtLeast(0)
@@ -157,7 +168,10 @@ fun NavGraph(
                     )
                     onOpenPluginTrack(track)
                 },
-                onBack = { navController.popBackStack() },
+                onBack = {
+                    mainViewModel.clearPlaylistDetail()
+                    navController.popBackStack()
+                },
                 viewModel = mainViewModel
             )
         }

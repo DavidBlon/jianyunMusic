@@ -3,6 +3,8 @@ package com.ncm.app.ui.screens.player
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -24,6 +26,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -44,6 +47,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -61,6 +65,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -223,6 +228,12 @@ fun PlayerScreen(
                         lyric = state.lyric,
                         tlyric = state.tlyric,
                         currentPosition = state.currentPosition,
+                        duration = state.duration,
+                        onSeek = { targetMs ->
+                            if (state.duration > 0L) {
+                                viewModel.setProgress(targetMs.toFloat() / state.duration)
+                            }
+                        },
                         modifier = Modifier
                             .fillMaxSize()
                             .clickable(
@@ -927,10 +938,13 @@ internal fun planLyricScroll(
 }
 
 @Composable
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 private fun LyricsPanel(
     lyric: String?,
     tlyric: String?,
     currentPosition: Long,
+    duration: Long,
+    onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val lines = remember(lyric, tlyric) { mergeLyrics(lyric, tlyric) }
@@ -946,8 +960,15 @@ private fun LyricsPanel(
     }
     var lastActiveIndex by remember(lyric, tlyric) { mutableIntStateOf(activeIndex) }
 
-    LaunchedEffect(activeIndex, lines.size) {
-        if (lines.isNotEmpty()) {
+    // 拖动歌词跳转（对齐 MusicFree：原生滚动 + 视口中心定位行，不拦截歌词滚动）。
+    var viewportHeight by remember { mutableFloatStateOf(0f) }
+    var userTouching by remember { mutableStateOf(false) }
+    var dragIndex by remember { mutableStateOf<Int?>(null) }
+    var dragLine by remember { mutableStateOf<LyricLine?>(null) }
+    var wasScrolling by remember { mutableStateOf(false) }
+
+    LaunchedEffect(activeIndex, lines.size, dragIndex) {
+        if (lines.isNotEmpty() && dragIndex == null) {
             val plan = planLyricScroll(lastActiveIndex, activeIndex)
             lastActiveIndex = activeIndex
             when (plan.motion) {
@@ -956,6 +977,29 @@ private fun LyricsPanel(
                 LyricScrollMotion.ANIMATE -> listState.animateScrollToItem(plan.targetIndex)
             }
         }
+    }
+
+    // 监听原生滚动：用户拖动时按视口中心行显示浮层，松手（滚动停止）后跳转到该行时间。
+    LaunchedEffect(listState, lines) {
+        snapshotFlow { listState.isScrollInProgress to listState.layoutInfo }
+            .collect { (scrolling, info) ->
+                if (scrolling && userTouching) {
+                    val center = viewportHeight / 2f
+                    val index = info.visibleItemsInfo.firstOrNull { item ->
+                        item.offset <= center && item.offset + item.size > center
+                    }?.index
+                    dragIndex = index
+                    dragLine = index?.let { lines.getOrNull(it) }
+                } else if (wasScrolling && !scrolling) {
+                    val index = dragIndex
+                    dragIndex = null
+                    dragLine = null
+                    if (index != null && index != activeIndex) {
+                        lines.getOrNull(index)?.let { line -> onSeek(line.timeMs) }
+                    }
+                }
+                wasScrolling = scrolling && userTouching
+            }
     }
 
     if (lines.isEmpty()) {
@@ -970,32 +1014,109 @@ private fun LyricsPanel(
         return
     }
 
-    LazyColumn(
-        state = listState,
-        modifier = modifier,
-        horizontalAlignment = Alignment.CenterHorizontally,
-        contentPadding = PaddingValues(vertical = 96.dp)
+    Box(
+        modifier = modifier.onSizeChanged { viewportHeight = it.height.toFloat() }
     ) {
-        itemsIndexed(lines) { index, line ->
-            LyricRow(line = line, active = index == activeIndex)
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    // 只读取触摸状态，不消费事件：LazyColumn 原生滚动照常工作。
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        userTouching = true
+                        try {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.changes.none { it.pressed }) break
+                            }
+                        } finally {
+                            userTouching = false
+                        }
+                    }
+                },
+            horizontalAlignment = Alignment.CenterHorizontally,
+            contentPadding = PaddingValues(vertical = 96.dp)
+        ) {
+            itemsIndexed(lines) { index, line ->
+                LyricRow(
+                    line = line,
+                    active = index == activeIndex,
+                    isDragging = index == dragIndex && dragIndex != null
+                )
+            }
+        }
+
+        // 拖动浮层（对齐 MusicFree draggingTime）：横向「时间 | 分隔线 | ▶」胶囊条，
+        // 位于视口约 38% 处，时间 clamp 到 [0, 时长]；▶ 点击同样可跳转。
+        dragLine?.let { line ->
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = with(LocalDensity.current) { (viewportHeight * 0.38f).toDp() })
+                    .background(Color(0x1AFFFFFF), RoundedCornerShape(14.dp))
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = formatTime(line.timeMs.coerceIn(0L, duration)),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color(0xFFDDDDDD)
+                )
+                Spacer(Modifier.width(10.dp))
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(18.dp)
+                        .background(Color(0x66FFFFFF))
+                )
+                Spacer(Modifier.width(4.dp))
+                IconButton(
+                    onClick = {
+                        onSeek(line.timeMs)
+                        dragIndex = null
+                        dragLine = null
+                    },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "定位到该句",
+                        tint = Color.White
+                    )
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun LyricRow(line: LyricLine, active: Boolean) {
+private fun LyricRow(
+    line: LyricLine,
+    active: Boolean,
+    isDragging: Boolean = false
+) {
     val rowPadding by animateDpAsState(
-        targetValue = if (active) 8.dp else 6.dp,
+        targetValue = if (active || isDragging) 8.dp else 6.dp,
         animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
         label = "lyricRowPadding"
     )
     val mainColor by animateColorAsState(
-        targetValue = if (active) TextPrimary else TextSecondary,
+        targetValue = when {
+            active -> TextPrimary
+            isDragging -> Color.White
+            else -> TextSecondary
+        },
         animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
         label = "lyricMainColor"
     )
     val translationColor by animateColorAsState(
-        targetValue = if (active) TextSecondary else TextTertiary,
+        targetValue = when {
+            active -> TextSecondary
+            isDragging -> TextSecondary
+            else -> TextTertiary
+        },
         animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
         label = "lyricTranslationColor"
     )
@@ -1010,7 +1131,7 @@ private fun LyricRow(line: LyricLine, active: Boolean) {
             text = line.text,
             style = MaterialTheme.typography.bodyMedium,
             color = mainColor,
-            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+            fontWeight = if (active || isDragging) FontWeight.SemiBold else FontWeight.Normal,
             textAlign = TextAlign.Center,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis

@@ -69,6 +69,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.core.content.ContextCompat
 import com.ncm.app.data.update.ApkUpdateInstaller
 import com.ncm.app.data.update.AppUpdateChecker
@@ -158,7 +159,8 @@ class MainActivity : ComponentActivity() {
 fun MainApp() {
     val navController = rememberNavController()
     val mainViewModel: MainViewModel = viewModel()
-    val playerViewModel: PlayerViewModel = viewModel()
+    val playerViewModel: PlayerViewModel =
+        ViewModelProvider(NeteaseApp.instance).get(PlayerViewModel::class.java)
     val appContext = LocalContext.current.applicationContext
     val onlineSourceViewModel = viewModel<OnlineMusicSourceViewModel> {
         createOnlineMusicSourceViewModel(appContext)
@@ -824,7 +826,6 @@ fun MiniPlayer(
                 Box(
                     modifier = Modifier
                         .size(34.dp)
-                        .accentSurface(CircleShape)
                         .clickable(
                             interactionSource = playPauseInteractionSource,
                             indication = null,

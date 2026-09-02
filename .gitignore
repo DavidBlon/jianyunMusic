@@ -33,3 +33,19 @@ build_errors.txt
 
 # Linglan paid music source credentials
 lx-music-source-paid-*.js
+
+# Local/debug artifacts
+*.db
+*.log
+device-*.png
+device-*.xml
+jianyun-*.png
+jianyun-*.xml
+ncm-*.png
+ncm-*.xml
+ui-*.png
+ui-*.xml
+memu-*.png
+release/*.apk
+release/update-*.json
+webapp/tests/.chrome-settings-jump/

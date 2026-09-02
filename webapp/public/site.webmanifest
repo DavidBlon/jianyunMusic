@@ -1,0 +1,12 @@
+{
+  "name": "简云音乐",
+  "short_name": "简云音乐",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0c121b",
+  "theme_color": "#0c121b",
+  "icons": [
+    { "src": "./assets/app-icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

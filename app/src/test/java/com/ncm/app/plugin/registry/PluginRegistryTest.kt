@@ -47,7 +47,8 @@ class PluginRegistryTest {
             downloader = { script.toByteArray() },
             verifier = ManifestSignatureVerifier(trustRootB64 = "", now = { 0L }),
             cache = cache(),
-            requireSignedManifest = false
+            requireSignedManifest = false,
+            requireManifestSha256 = true
         )
 
         val result = registry.install(item(sha256 = ManifestSignatureVerifier.sha256Hex(script)))
@@ -133,7 +134,7 @@ class PluginRegistryTest {
 
     @Test
     fun transitionModeInstallsUnsignedScriptWhenShaMatches() = runTest {
-        // 过渡模式（requireSignedManifest=false，2026-08 聆澜联调前）：无签名脚本仅校验可选 SHA-256
+        // 过渡模式：无签名脚本也必须提供并匹配清单 SHA-256。
         val script = "module.exports = { platform: 'kw', version: '1.0.0' };"
         val hash = ManifestSignatureVerifier.sha256Hex(script)
         val provider = FakeProvider("linglan.kw")
@@ -210,5 +211,68 @@ class PluginRegistryTest {
         )
         val result = registry.install(item(id = "linglan.kw", sha256 = hash))
         assertTrue(result.isFailure)
+    }
+
+    @Test
+    fun installRejectsUrlOutsidePolicyBeforeDownloading() = runTest {
+        var downloaded = false
+        val registry = PluginRegistry(
+            runtimeFactory = { _, _, _ -> throw UnsupportedOperationException("不应到达") },
+            downloader = {
+                downloaded = true
+                ByteArray(0)
+            },
+            verifier = ManifestSignatureVerifier(trustRootB64 = "", now = { 0L }),
+            cache = cache(),
+            requireSignedManifest = false,
+            installPolicy = { false }
+        )
+
+        val result = registry.install(
+            item(id = "linglan.kw", url = "https://blocked.example/kw.js", sha256 = "abc")
+        )
+
+        assertTrue(result.isFailure)
+        assertTrue(!downloaded)
+    }
+
+    @Test
+    fun transitionModeRequiresManifestSha256() = runTest {
+        val registry = PluginRegistry(
+            runtimeFactory = { _, _, _ -> throw UnsupportedOperationException("不应到达") },
+            downloader = { error("不应下载缺少摘要的脚本") },
+            verifier = ManifestSignatureVerifier(trustRootB64 = "", now = { 0L }),
+            cache = cache(),
+            requireSignedManifest = false
+        )
+
+        val result = registry.install(
+            item(id = "linglan.kw", url = "https://allowed.example/kw.js", sha256 = null)
+        )
+
+        assertTrue(result.isFailure)
+    }
+
+    @Test
+    fun transitionModeCanExplicitlyAllowMissingSha256ForTesting() = runTest {
+        val script = "module.exports = { platform: 'kw', version: '1.0.0' };"
+        val provider = FakeProvider("linglan.kw")
+        val registry = PluginRegistry(
+            runtimeFactory = { pluginId, _, _ ->
+                InMemoryPluginRuntime(mapOf(pluginId to provider))
+            },
+            downloader = { script.toByteArray() },
+            verifier = ManifestSignatureVerifier(trustRootB64 = "", now = { 0L }),
+            cache = cache(),
+            requireSignedManifest = false,
+            requireManifestSha256 = false
+        )
+
+        val result = registry.install(
+            item(id = "linglan.kw", url = "https://source.shiqianjiang.cn/script/mf/kw.js", sha256 = null)
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals("linglan.kw", result.getOrThrow().pluginId)
     }
 }

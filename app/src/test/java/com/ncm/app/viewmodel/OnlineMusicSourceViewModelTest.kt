@@ -11,6 +11,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -22,7 +23,8 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class OnlineMusicSourceViewModelTest {
 
-    private val dispatcher = StandardTestDispatcher()
+    private val scheduler = TestCoroutineScheduler()
+    private val dispatcher = StandardTestDispatcher(scheduler)
 
     @Before fun setUp() { Dispatchers.setMain(dispatcher) }
     @After fun tearDown() { Dispatchers.resetMain() }
@@ -162,7 +164,7 @@ class OnlineMusicSourceViewModelTest {
         )
         val signedItem = com.ncm.app.plugin.manifest.ManifestItem(
             id = "linglan.kw", name = "酷我音乐", version = "1.0.0",
-            url = "https://provider.example/kw/v1.js",
+            url = "https://source.shiqianjiang.cn/script/mf/kw.js",
             category = com.ncm.app.plugin.model.PluginCategory.MUSIC, protocolVersion = 1,
             minHostVersion = null, status = com.ncm.app.plugin.model.PluginReleaseStatus.ACTIVE,
             sha256 = hash, signature = sig, signatureTimestamp = 1_000_000L
@@ -260,6 +262,16 @@ private class SourceTestProvider(
 }
 
 private suspend fun sampleManifest(): List<ManifestItem> = listOf(
-    ManifestItem("linglan.kw", "Source KW", "1.0.0", "https://provider.example/kw/v1.js", PluginCategory.MUSIC, 1, null, PluginReleaseStatus.ACTIVE, null),
-    ManifestItem("linglan.tx", "Source TX", "1.0.0", "https://provider.example/tx/v1.js", PluginCategory.MUSIC, 1, null, PluginReleaseStatus.ACTIVE, null)
+    ManifestItem(
+        "linglan.kw", "Source KW", "1.0.0",
+        "https://source.shiqianjiang.cn/script/mf/kw.js",
+        PluginCategory.MUSIC, 1, null, PluginReleaseStatus.ACTIVE,
+        com.ncm.app.plugin.security.ManifestSignatureVerifier.sha256Hex("cached-script")
+    ),
+    ManifestItem(
+        "linglan.tx", "Source TX", "1.0.0",
+        "https://source.shiqianjiang.cn/script/mf/tx.js",
+        PluginCategory.MUSIC, 1, null, PluginReleaseStatus.ACTIVE,
+        com.ncm.app.plugin.security.ManifestSignatureVerifier.sha256Hex("cached-script")
+    )
 )

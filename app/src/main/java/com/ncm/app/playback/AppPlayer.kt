@@ -21,13 +21,16 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.session.MediaSession
 import com.ncm.app.MainActivity
 import com.ncm.app.NeteaseApp
 import com.ncm.app.data.cache.LinglanCachePolicy
 import com.ncm.app.data.model.Song
+import com.ncm.app.plugin.security.SsrfBlockingDns
+import com.ncm.app.plugin.security.SsrfGuard
 import com.ncm.app.util.albumArtworkUrl
 import okhttp3.OkHttpClient
 import java.io.IOException
@@ -107,14 +110,56 @@ object AppPlayer {
                     .setPrioritizeTimeOverSizeThresholds(true)
                     .build()
             )
-            .setMediaSourceFactory(
-                DefaultMediaSourceFactory(playbackDataSourceFactory())
-            )
+            .setMediaSourceFactory(playbackMediaSourceFactory())
             .build()
             .also { exoPlayer = it }
     }
 
     fun rhythmEnergy(): Float = rhythmAudioProcessor.visualEnergy()
+
+    /**
+     * 渐进式 + HLS 组合工厂：m3u8 走 HlsMediaSource（酷狗/QQ 源常见），其余走 Progressive。
+     * 两者共享 SelectivePlaybackDataSource，保留「plugin:」请求头与聆澜缓存的路由。
+     */
+    private fun playbackMediaSourceFactory(): androidx.media3.exoplayer.source.MediaSource.Factory {
+        val dataSourceFactory = playbackDataSourceFactory()
+        return object : androidx.media3.exoplayer.source.MediaSource.Factory {
+            private val progressive = ProgressiveMediaSource.Factory(dataSourceFactory)
+            private val hls = HlsMediaSource.Factory(dataSourceFactory)
+
+            override fun setLoadErrorHandlingPolicy(
+                loadErrorHandlingPolicy: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
+            ): androidx.media3.exoplayer.source.MediaSource.Factory {
+                progressive.setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
+                hls.setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
+                return this
+            }
+
+            override fun setDrmSessionManagerProvider(
+                drmSessionManagerProvider: androidx.media3.exoplayer.drm.DrmSessionManagerProvider
+            ): androidx.media3.exoplayer.source.MediaSource.Factory {
+                progressive.setDrmSessionManagerProvider(drmSessionManagerProvider)
+                hls.setDrmSessionManagerProvider(drmSessionManagerProvider)
+                return this
+            }
+
+            override fun getSupportedTypes(): IntArray = intArrayOf(C.TYPE_OTHER, C.TYPE_HLS)
+
+            override fun createMediaSource(mediaItem: MediaItem): androidx.media3.exoplayer.source.MediaSource {
+                val uri = mediaItem.localConfiguration?.uri
+                return if (isHlsUri(uri)) {
+                    hls.createMediaSource(mediaItem)
+                } else {
+                    progressive.createMediaSource(mediaItem)
+                }
+            }
+        }
+    }
+
+    private fun isHlsUri(uri: Uri?): Boolean {
+        val path = uri?.path?.lowercase() ?: return false
+        return path.endsWith(".m3u8")
+    }
 
     private fun playbackDataSourceFactory(): DataSource.Factory {
         val httpDataSourceFactory = OkHttpDataSource.Factory(playbackHttpClient())
@@ -136,6 +181,7 @@ object AppPlayer {
         return OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
+            .dns(SsrfBlockingDns(SsrfGuard()))
             .build()
     }
 
@@ -155,6 +201,7 @@ object AppPlayer {
         return OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
+            .dns(SsrfBlockingDns(SsrfGuard()))
             .addInterceptor { chain ->
                 val builder = chain.request().newBuilder()
                     .header("User-Agent", PLAYBACK_USER_AGENT)

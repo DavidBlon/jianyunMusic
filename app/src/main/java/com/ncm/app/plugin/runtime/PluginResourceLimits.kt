@@ -5,7 +5,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 
 data class PluginResourceLimits(
-    val executionTimeoutMs: Long = 10_000L,
+    val executionTimeoutMs: Long = 30_000L,
     val maxResponseBytes: Int = 5 * 1024 * 1024,
     val maxRedirects: Int = 5
 )

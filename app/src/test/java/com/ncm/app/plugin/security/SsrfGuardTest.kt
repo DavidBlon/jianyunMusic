@@ -64,4 +64,16 @@ class SsrfGuardTest {
         assertTrue(guard.validateResolved(java.net.InetAddress.getByName("192.168.1.1"), 443).isDeny)
         assertTrue(guard.validateResolved(java.net.InetAddress.getByName("8.8.8.8"), 443).isAllow)
     }
+
+    @Test
+    fun resolvedAnyLocalAndMappedPrivateAddressesAreDenied() {
+        val guard = SsrfGuard()
+        assertTrue(guard.validateResolved(java.net.InetAddress.getByName("0.0.0.0"), 443).isDeny)
+        val mappedPrivate = java.net.Inet6Address.getByAddress(
+            null,
+            byteArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff.toByte(), 0xff.toByte(), 10, 0, 0, 1),
+            null
+        )
+        assertTrue(guard.validateResolved(mappedPrivate, 443).isDeny)
+    }
 }

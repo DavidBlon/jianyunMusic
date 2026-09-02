@@ -21,6 +21,7 @@ import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -146,6 +147,10 @@ fun PlaylistDetailScreen(
     LaunchedEffect(playlistId) {
         viewModel.loadPlaylistDetail(playlistId)
         viewModel.loadMyData()
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { viewModel.clearPlaylistDetail() }
     }
 
     LaunchedEffect(playlistId, state.loadedPlaylistId, visibleTracks) {

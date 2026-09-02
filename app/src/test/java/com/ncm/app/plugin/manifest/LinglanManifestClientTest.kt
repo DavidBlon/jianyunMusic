@@ -22,7 +22,7 @@ class LinglanManifestClientTest {
 
     @Test
     fun parsesManifestIntoDescriptors() = runTest {
-        val client = LinglanManifestClient(http = { sampleJson })
+        val client = LinglanManifestClient(http = { _, _ -> sampleJson })
         val items = client.fetch("test-key")
         assertEquals(2, items.size)
         assertEquals("linglan.kw", items[0].id)
@@ -32,13 +32,13 @@ class LinglanManifestClientTest {
 
     @Test
     fun malformedJsonYieldsEmptyListNotCrash() = runTest {
-        val client = LinglanManifestClient(http = { "not-json" })
+        val client = LinglanManifestClient(http = { _, _ -> "not-json" })
         assertEquals(emptyList<ManifestItem>(), client.fetch("test-key"))
     }
 
     @Test
     fun missingStableIdDropsItem() = runTest {
-        val client = LinglanManifestClient(http = {
+        val client = LinglanManifestClient(http = { _, _ ->
             """{"plugins":[{"name":"无ID","version":"1.0","url":"https://provider.example/other.js","category":"music"}]}"""
         })
         assertEquals(emptyList<ManifestItem>(), client.fetch("test-key"))
@@ -57,7 +57,7 @@ class LinglanManifestClientTest {
               {"name":"GitCode","url":"https://source.shiqianjiang.cn/script/mf/git.js?key=SECRET.json","version":"4.0.0"}
             ]}
         """.trimIndent()
-        val client = LinglanManifestClient(http = { realJson })
+        val client = LinglanManifestClient(http = { _, _ -> realJson })
         val items = client.fetch("test-key")
         assertEquals(4, items.size)
         assertEquals("linglan.kg", items.first { it.name == "酷狗音乐" }.id)
@@ -68,25 +68,27 @@ class LinglanManifestClientTest {
     }
 
     @Test
-    fun endpointTemplateAppendsSecretToUrl() = runTest {
+    fun endpointTemplateNeverContainsSecretInUrl() = runTest {
         var requestedUrl: String? = null
+        var requestedSecret: String? = null
         val client = LinglanManifestClient(
-            endpointTemplate = "https://example.test/mf.json?key=",
-            http = { url -> requestedUrl = url; "{\"plugins\":[]}" }
+            endpointTemplate = "https://example.test/mf.json",
+            http = { url, secret -> requestedUrl = url; requestedSecret = secret; "{\"plugins\":[]}" }
         )
         client.fetch("CERU_KEY-abc")
-        assertEquals("https://example.test/mf.json?key=CERU_KEY-abc", requestedUrl)
+        assertEquals("https://example.test/mf.json", requestedUrl)
+        assertEquals("CERU_KEY-abc", requestedSecret)
     }
 
     @Test
-    fun requestUrlEncodesReservedCharactersInSecret() {
+    fun requestUrlHasNoCredentialQueryParameter() {
         val client = LinglanManifestClient(
-            endpointTemplate = "https://example.test/mf.json?key=",
-            http = { "{\"plugins\":[]}" }
+            endpointTemplate = "https://example.test/mf.json",
+            http = { _, _ -> "{\"plugins\":[]}" }
         )
         assertEquals(
-            "https://example.test/mf.json?key=a%2Bb%26c%3Dd",
-            client.requestUrl("a+b&c=d")
+            "https://example.test/mf.json",
+            client.requestUrl()
         )
     }
 }

@@ -1,0 +1,9 @@
+{
+  "name": "jianyun-music-webapp",
+  "version": "2.4.2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check public/app.js"
+  }
+}

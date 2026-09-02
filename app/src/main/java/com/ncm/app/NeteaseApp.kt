@@ -3,6 +3,8 @@ package com.ncm.app
 import android.app.Application
 import android.content.Context
 import android.os.Build
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
@@ -39,6 +41,7 @@ import com.ncm.app.plugin.runtime.PluginRuntime
 import com.ncm.app.plugin.runtime.PluginScriptCache
 import com.ncm.app.plugin.runtime.QuickJsPluginRuntime
 import com.ncm.app.plugin.security.ManifestSignatureVerifier
+import com.ncm.app.plugin.security.SsrfBlockingDns
 import com.ncm.app.plugin.security.SsrfGuard
 import com.whl.quickjs.android.QuickJSLoader
 import com.ncm.app.ui.theme.AccentThemeSettings
@@ -61,7 +64,12 @@ val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 /** 中性应用入口别名（P6T4）：旧类名保留到功能稳定后的包名/工程名迁移（spec §13）。 */
 typealias JianyunApp = NeteaseApp
 
-class NeteaseApp : Application(), ImageLoaderFactory {
+class NeteaseApp : Application(), ImageLoaderFactory, ViewModelStoreOwner {
+
+    private val appViewModelStore = ViewModelStore()
+
+    override val viewModelStore: ViewModelStore
+        get() = appViewModelStore
 
     lateinit var repository: MusicRepository
         private set
@@ -161,11 +169,13 @@ class NeteaseApp : Application(), ImageLoaderFactory {
     private fun initPluginHost() {
         onlineSourceSettings = com.ncm.app.data.store.MusicSourceSettings(this)
 
+        val pluginSsrfGuard = SsrfGuard(allowHttpsOnly = false)
         val pluginHttp = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)
             .followRedirects(false)
+            .dns(SsrfBlockingDns(pluginSsrfGuard))
             .build()
         val pluginHttpExecutor: HttpExecutor = { spec ->
             val request = Request.Builder()
@@ -190,10 +200,11 @@ class NeteaseApp : Application(), ImageLoaderFactory {
         val onDemandManifestClient = LinglanManifestClient(
             endpointTemplate = manifestApiRoot?.let { "$it/script/mf.json" }
                 ?: LinglanManifestClient.DEFAULT_ENDPOINT_TEMPLATE,
-            http = { url ->
+            http = { url, secret ->
                 val request = Request.Builder()
                     .url(url)
                     .header("User-Agent", "JianYunMusic/${BuildConfig.VERSION_NAME}")
+                    .header("X-API-Key", secret)
                     .build()
                 pluginHttp.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
@@ -212,7 +223,7 @@ class NeteaseApp : Application(), ImageLoaderFactory {
             // MusicFree providers still use public HTTP endpoints for lyrics and metadata.
             // Private/literal addresses and restricted ports remain blocked by SsrfGuard;
             // resolved media playback keeps the stricter HTTPS-only guard below.
-            ssrfGuard = SsrfGuard(allowHttpsOnly = false),
+            ssrfGuard = pluginSsrfGuard,
             executor = authorizedPluginHttpExecutor::execute
         )
 
@@ -242,11 +253,16 @@ class NeteaseApp : Application(), ImageLoaderFactory {
                     response.body?.bytes() ?: byteArrayOf()
                 }
             },
-            verifier = ManifestSignatureVerifier(trustRootB64 = "", now = { System.currentTimeMillis() }),
+            verifier = ManifestSignatureVerifier(
+                trustRootB64 = BuildConfig.PAID_MUSIC_TRUST_ROOT_B64,
+                now = { System.currentTimeMillis() }
+            ),
             cache = scriptCache,
-            // 过渡模式（2026-08 确认）：聆澜脚本暂无签名，仅 HTTPS + 大小 + 可选 SHA-256 校验；
-            // 聆澜提供签名后改回 requireSignedManifest = true（生产门禁，§9）
-            requireSignedManifest = false
+            installPolicy = { item ->
+                DEFAULT_SOURCE_ALLOW_RULES.any { it.matches(item.url) }
+            },
+            requireSignedManifest = BuildConfig.PAID_MUSIC_REQUIRE_SIGNED_MANIFEST,
+            requireManifestSha256 = BuildConfig.PAID_MUSIC_REQUIRE_MANIFEST_SHA256
         )
 
         pluginRuntime = RegistryPluginRuntime(pluginRegistry)
@@ -254,7 +270,7 @@ class NeteaseApp : Application(), ImageLoaderFactory {
         // addresses and restricted ports blocked while allowing the exact resolved stream.
         playbackResolver = PlaybackResolver(
             runtime = pluginRuntime,
-            ssrfGuard = SsrfGuard(allowHttpsOnly = false),
+            ssrfGuard = pluginSsrfGuard,
             restoreProvider = { pluginId -> pluginRegistry.restore(pluginId).getOrNull() },
             installProvider = installProvider@ { pluginId ->
                 val secret = credentialStore.read().orEmpty()

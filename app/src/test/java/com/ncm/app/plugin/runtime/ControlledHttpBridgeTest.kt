@@ -40,6 +40,44 @@ class ControlledHttpBridgeTest {
     }
 
     @Test
+    fun crossOriginRedirectDropsSensitiveHeaders() = runTest {
+        val responses = mapOf(
+            "https://a.example/authorized" to HttpResult(
+                302,
+                mapOf("location" to "https://b.example/target"),
+                byteArrayOf()
+            ),
+            "https://b.example/target" to HttpResult(200, emptyMap(), "ok".toByteArray())
+        )
+        val captured = mutableListOf<HttpRequestSpec>()
+        val bridge = ControlledHttpBridge(
+            ssrfGuard = guard,
+            executor = { spec ->
+                captured += spec
+                responses.getValue(spec.url)
+            }
+        )
+
+        bridge.execute(
+            HttpRequestSpec(
+                "https://a.example/authorized",
+                "GET",
+                mapOf(
+                    "X-API-Key" to "card-secret",
+                    "Cookie" to "session=abc",
+                    "Accept" to "application/json"
+                )
+            )
+        )
+
+        assertEquals(2, captured.size)
+        val forwarded = captured[1].headers
+        assertTrue(forwarded.keys.none { it.equals("X-API-Key", ignoreCase = true) })
+        assertTrue(forwarded.keys.none { it.equals("Cookie", ignoreCase = true) })
+        assertEquals("application/json", forwarded["Accept"])
+    }
+
+    @Test
     fun responseLargerThanLimitIsRejected() = runTest {
         val responses = mutableMapOf<String, HttpResult>()
         responses["https://a.example/big"] =

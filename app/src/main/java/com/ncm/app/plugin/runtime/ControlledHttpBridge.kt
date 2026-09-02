@@ -52,7 +52,17 @@ class ControlledHttpBridge(
         if (redirectDecision is SsrfDecision.Deny) {
             throw IllegalStateException("blocked redirect: ${redirectDecision.reason}")
         }
-        return executeWithRedirects(transportSpec.copy(url = nextUrl, body = null), remaining - 1)
+        val nextHeaders = if (sameOrigin(spec.url, nextUrl)) {
+            transportSpec.headers
+        } else {
+            transportSpec.headers.filterKeys { key ->
+                key.lowercase() !in SENSITIVE_REDIRECT_HEADERS
+            }
+        }
+        return executeWithRedirects(
+            transportSpec.copy(url = nextUrl, headers = nextHeaders, body = null),
+            remaining - 1
+        )
     }
 
     private fun isRedirect(status: Int): Boolean = status in setOf(301, 302, 303, 307, 308)
@@ -61,5 +71,28 @@ class ControlledHttpBridge(
         val baseUrl = java.net.URI(base)
         val resolved = baseUrl.resolve(location)
         return resolved.toString()
+    }
+
+    private fun sameOrigin(first: String, second: String): Boolean {
+        val firstUri = try { java.net.URI(first) } catch (_: Exception) { return false }
+        val secondUri = try { java.net.URI(second) } catch (_: Exception) { return false }
+        if (!firstUri.scheme.equals(secondUri.scheme, ignoreCase = true)) return false
+        if (!firstUri.host.equals(secondUri.host, ignoreCase = true)) return false
+        return effectivePort(firstUri) == effectivePort(secondUri)
+    }
+
+    private fun effectivePort(uri: java.net.URI): Int = when {
+        uri.port > 0 -> uri.port
+        uri.scheme.equals("https", ignoreCase = true) -> 443
+        else -> 80
+    }
+
+    private companion object {
+        val SENSITIVE_REDIRECT_HEADERS = setOf(
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "x-api-key"
+        )
     }
 }

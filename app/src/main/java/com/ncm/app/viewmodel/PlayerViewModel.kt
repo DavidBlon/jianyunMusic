@@ -105,6 +105,8 @@ class PlayerViewModel : ViewModel() {
         private const val PROGRESS_UPDATE_INTERVAL_MS = 500L
         private const val MIN_PROGRESS_UPDATE_MS = 400L
         private const val HISTORY_LIMIT = 100
+        private const val MAX_CONSECUTIVE_PLAYBACK_FAILURES = 3
+        private const val SKIP_AFTER_FAILURE_DELAY_MS = 500L
     }
 
     private data class PreparedQueueItem(
@@ -131,8 +133,10 @@ class PlayerViewModel : ViewModel() {
     private var bufferingFallbackJob: Job? = null
     private var sleepTimerJob: Job? = null
     private var queuePrefetchAnchorSongId: Long? = null
-    private var transientBackupSongId: Long? = null
+private var transientBackupSongId: Long? = null
     private var pendingPluginTrack: OnlineTrack? = null
+    private var consecutivePlaybackFailures = 0
+    private var retriedResolveSongKey: String? = null
     private val pluginPlaybackQueue = PluginPlaybackQueue()
     private val playlistPlaybackQueue = PlaylistPlaybackQueue()
     private val preparedQueueItems = mutableMapOf<Long, PreparedQueueItem>()
@@ -230,10 +234,15 @@ class PlayerViewModel : ViewModel() {
             prefetchQueueAfter(songId)
         }
 
-        override fun onPlayerError(error: PlaybackException) {
+override fun onPlayerError(error: PlaybackException) {
             Log.e(TAG, "playerError ${error.errorCodeName}", error)
-            // 已解析媒体在传输阶段失败时仍明确提示；解析阶段会先尝试严格匹配的混合来源。
-            showPlaybackError(error)
+            // 传输阶段失败（HTTP 状态码/网络 IO/超时）可自动恢复：先重解析（URL 可能过期），
+            // 仍失败则参照 MusicFree 的行为自动跳到下一首；解码类错误只提示。
+            if (!isAutoRecoverableError(error)) {
+                showPlaybackError(error)
+                return
+            }
+            handleAutoRecoverableFailure()
         }
     }
 
@@ -250,8 +259,10 @@ class PlayerViewModel : ViewModel() {
         refreshLinglanCacheStats()
     }
 
-    fun play(songId: Long) {
+fun play(songId: Long) {
         pendingPluginTrack = null
+        consecutivePlaybackFailures = 0
+        retriedResolveSongKey = null
         if (playlistPlaybackQueue.selectLocal(songId)) {
             syncPlaylistQueueState()
         }
@@ -322,7 +333,9 @@ class PlayerViewModel : ViewModel() {
      * 插件轨道播放（spec §4）：解析 → SSRF 校验 → 单曲入队播放。
      * 队列/喜欢/历史等 Song 主键能力不适用于插件轨道（阶段 5 迁移主键后统一）。
      */
-    fun playPluginTrack(track: OnlineTrack): Long {
+fun playPluginTrack(track: OnlineTrack): Long {
+        consecutivePlaybackFailures = 0
+        retriedResolveSongKey = null
         if (playlistPlaybackQueue.isActive) {
             playlistPlaybackQueue.selectOnline(track.key)
             syncPlaylistQueueState()
@@ -358,11 +371,11 @@ class PlayerViewModel : ViewModel() {
                     pluginPlaybackQueue.replaceSelected(track, playedTrack)
                     syncPluginQueueState()
                 }
-                val mediaItem = AppPlayer.pluginMediaItem(
+val mediaItem = AppPlayer.pluginMediaItem(
                     playedTrack,
                     playedShellSong,
                     media.url,
-                    media.headers,
+                    effectivePluginHeaders(media),
                     playedSource
                 )
                 player.stop()
@@ -953,6 +966,159 @@ class PlayerViewModel : ViewModel() {
             isLoading = false,
             isPlaying = false,
             error = "播放失败：${error.errorCodeName}"
+        )
+    }
+
+    private fun isAutoRecoverableError(error: PlaybackException): Boolean = when (error.errorCode) {
+        PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+        PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
+        PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE -> true
+        else -> false
+    }
+
+    /** 可恢复播放失败：插件来源先重解析一次（URL 过期场景），仍失败则自动跳下一首（MusicFree 行为）。 */
+    private fun handleAutoRecoverableFailure() {
+        val current = _state.value
+        val song = current.currentSong ?: return
+        val isPlugin = isPluginPlaybackSource(current.audioSource)
+        val failureKey = if (isPlugin) {
+            (AppPlayer.currentPluginTrack() ?: pendingPluginTrack)?.key?.asComposite() ?: return
+        } else {
+            song.id.toString()
+        }
+
+        if (consecutivePlaybackFailures >= MAX_CONSECUTIVE_PLAYBACK_FAILURES) {
+            stopAfterRepeatedFailures()
+            return
+        }
+        if (isPlugin && failureKey != retriedResolveSongKey) {
+            retriedResolveSongKey = failureKey
+            retryResolveCurrentPluginTrack(current)
+            return
+        }
+        consecutivePlaybackFailures++
+        skipFailedSong()
+    }
+
+    /** 插件来源传输失败时重新解析（新 URL + 内置换源 fallback），成功后重建播放。 */
+    private fun retryResolveCurrentPluginTrack(state: PlayerUiState) {
+        val track = AppPlayer.currentPluginTrack() ?: pendingPluginTrack ?: return
+        val shellSong = pluginShellSong(track)
+        val requestToken = ++playRequestToken
+        playRequestJob?.cancel()
+        bufferingFallbackJob?.cancel()
+        _state.value = state.copy(isLoading = true, error = null)
+        playRequestJob = viewModelScope.launch {
+            val resolved = withContext(Dispatchers.IO) {
+                app.playbackResolver.resolveTrack(track, pluginQualityLabel(state.quality))
+            }
+            resolved.onSuccess { playback ->
+                if (!isCurrentSongRequest(requestToken, shellSong.id)) return@onSuccess
+                val playedTrack = playback.track
+                val playedShellSong = pluginShellSong(playedTrack)
+                val playedSource = "plugin:${playedTrack.key.pluginId}"
+                val media = playback.media
+                pendingPluginTrack = playedTrack
+                if (playlistPlaybackQueue.isActive) {
+                    playlistPlaybackQueue.replaceSelected(track, playedTrack)
+                    syncPlaylistQueueState()
+                } else {
+                    pluginPlaybackQueue.replaceSelected(track, playedTrack)
+                    syncPluginQueueState()
+                }
+val mediaItem = AppPlayer.pluginMediaItem(
+                    playedTrack,
+                    playedShellSong,
+                    media.url,
+                    effectivePluginHeaders(media),
+                    playedSource
+                )
+                player.stop()
+                player.setMediaItems(listOf(mediaItem))
+                player.prepare()
+                player.play()
+                AppPlayer.startPlaybackService(app)
+                AppPlayer.updateCurrentPlayback(playedShellSong, playedSource)
+                AppPlayer.beginPlaybackSession(playedShellSong)
+                AppPlayer.refreshPlaybackNotification(app)
+                _state.value = _state.value.copy(
+                    currentSong = playedShellSong,
+                    songUrl = media.url,
+                    audioSource = playedSource,
+                    duration = playedShellSong.dt,
+                    lyric = null,
+                    tlyric = null,
+                    isPlaying = true,
+                    isLoading = false,
+                    currentPosition = 0,
+                    progress = 0f,
+                    isLiked = false,
+                    isLikeUpdating = false,
+                    error = if (playback.usedFallback) {
+                        "原音源不可用，已切换至${pluginSourceDisplayName(playedTrack.key.pluginId)}"
+                    } else {
+                        null
+                    }
+                )
+                refreshPluginLiked(playedTrack)
+                app.onlinePlaybackHistoryStore.remember(playedTrack)
+                loadPluginLyric(playedTrack)
+}.onFailure { e ->
+                if (!isCurrentSongRequest(requestToken, shellSong.id)) return@onFailure
+                consecutivePlaybackFailures++
+                skipFailedSong()
+            }
+        }
+    }
+
+    /** 插件返回的 userAgent 优先于通用 UA 注入播放请求头（部分 CDN 依赖特定 UA）。 */
+    private fun effectivePluginHeaders(media: com.ncm.app.plugin.model.ResolvedMedia): Map<String, String> {
+        val ua = media.userAgent?.trim().orEmpty()
+        if (ua.isBlank()) return media.headers
+        if (media.headers.keys.any { it.equals("User-Agent", ignoreCase = true) }) return media.headers
+        return media.headers + ("User-Agent" to ua)
+    }
+
+    private fun hasSkippableNext(): Boolean {
+        if (playlistPlaybackQueue.isActive) return playlistPlaybackQueue.entries.size > 1
+        if (isPluginPlaybackSource(_state.value.audioSource)) return pluginPlaybackQueue.tracks.size > 1
+        return playQueue.size > 1
+    }
+
+    /** MusicFree handlePlayFail 行为：reset 播放器 → 短暂延迟 → 自动跳下一首。 */
+    private fun skipFailedSong() {
+        bufferingFallbackJob?.cancel()
+        progressJob?.cancel()
+        _state.value = _state.value.copy(isLoading = false, isPlaying = false)
+        if (!hasSkippableNext()) {
+            stopUnavailable("当前歌曲播放失败：${_state.value.currentSong?.name ?: "未知歌曲"}，队列中没有可跳过的歌曲")
+            return
+        }
+        player.stop()
+        player.clearMediaItems()
+        viewModelScope.launch {
+            delay(SKIP_AFTER_FAILURE_DELAY_MS)
+            playNext()
+        }
+    }
+
+    private fun stopAfterRepeatedFailures() {
+        consecutivePlaybackFailures = 0
+        retriedResolveSongKey = null
+        bufferingFallbackJob?.cancel()
+        progressJob?.cancel()
+        player.stop()
+        player.clearMediaItems()
+        AppPlayer.stopPlaybackService(app)
+        _state.value = _state.value.copy(
+            songUrl = null,
+            isLoading = false,
+            isPlaying = false,
+            currentPosition = 0,
+            progress = 0f,
+            error = "连续多首歌曲播放失败，已自动停止"
         )
     }
 

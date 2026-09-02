@@ -48,13 +48,11 @@ fun allowedManifestItems(
     }
 }
 
-/** 从稳定 ID 或下载 URL 提取来源类型；无法命中返回 null（不可产生持久数据）。 */
+/** 来源类型只从允许的下载 URL 规则中提取；稳定 ID 不能绕过 URL 白名单。 */
 fun sourceTypeOf(item: ManifestItem, rules: List<SourceAllowRule>): String? {
-    if (item.id.isNotBlank()) {
-        val last = item.id.substringAfterLast('.')
-        return last.takeIf { it in ALLOWED_SOURCE_TYPES }
-    }
-    return rules.firstOrNull { it.matches(item.url) }?.sourceType
+    return rules.firstOrNull { it.matches(item.url) }
+        ?.sourceType
+        ?.takeIf { it in ALLOWED_SOURCE_TYPES }
 }
 
 /** 清单无稳定 id 时，按 GC #5 版本化精确映射生成；无法命中返回 null。 */

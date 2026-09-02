@@ -66,6 +66,20 @@ val paidMusicApiUrl = nonBlank(providers.gradleProperty("paidMusicApiUrl").orNul
     ?: paidMusicScriptConstant("API_URL")
     ?: "https://source.shiqianjiang.cn/api/music"
 val paidMusicScriptCheckId = paidMusicScriptConstant("SCRIPT_MD5").orEmpty()
+val paidMusicTrustRootB64 = nonBlank(providers.gradleProperty("paidMusicTrustRootB64").orNull)
+    ?: nonBlank(providers.environmentVariable("PAID_MUSIC_TRUST_ROOT_B64").orNull)
+    ?: nonBlank(localProperties.getProperty("paidMusicTrustRootB64"))
+    ?: ""
+val requireSignedPaidMusicManifest =
+    providers.gradleProperty("requireSignedPaidMusicManifest").orNull?.toBoolean()
+        ?: providers.environmentVariable("REQUIRE_SIGNED_PAID_MUSIC_MANIFEST").orNull?.toBoolean()
+        ?: localProperties.getProperty("requireSignedPaidMusicManifest")?.toBoolean()
+        ?: false
+val requirePaidMusicManifestSha256 =
+    providers.gradleProperty("requireManifestSha256").orNull?.toBoolean()
+        ?: providers.environmentVariable("REQUIRE_PAID_MUSIC_MANIFEST_SHA256").orNull?.toBoolean()
+        ?: localProperties.getProperty("requireManifestSha256")?.toBoolean()
+        ?: false
 
 val jianyunContentBaseUrl = nonBlank(providers.gradleProperty("jianyunContentBaseUrl").orNull)
     ?: nonBlank(providers.environmentVariable("JIANYUN_CONTENT_BASE_URL").orNull)
@@ -86,12 +100,15 @@ android {
         applicationId = "com.ncm.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 10
-        versionName = "2.4.0"
+        versionCode = 12
+        versionName = "2.4.2"
 
         buildConfigField("String", "API_BASE_URL", "\"https://music.163.com/\"")
         buildConfigField("String", "PAID_MUSIC_API_URL", buildConfigString(paidMusicApiUrl))
         buildConfigField("String", "PAID_MUSIC_SCRIPT_CHECK_ID", buildConfigString(paidMusicScriptCheckId))
+        buildConfigField("String", "PAID_MUSIC_TRUST_ROOT_B64", buildConfigString(paidMusicTrustRootB64))
+        buildConfigField("Boolean", "PAID_MUSIC_REQUIRE_SIGNED_MANIFEST", requireSignedPaidMusicManifest.toString())
+        buildConfigField("Boolean", "PAID_MUSIC_REQUIRE_MANIFEST_SHA256", requirePaidMusicManifestSha256.toString())
         buildConfigField("String", "JIANYUN_CONTENT_BASE_URL", buildConfigString(jianyunContentBaseUrl))
     }
 
@@ -168,6 +185,7 @@ dependencies {
 
     // Audio playback
     implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
     implementation("androidx.media3:media3-datasource:1.4.1")
     implementation("androidx.media3:media3-datasource-okhttp:1.4.1")
     implementation("androidx.media3:media3-session:1.4.1")

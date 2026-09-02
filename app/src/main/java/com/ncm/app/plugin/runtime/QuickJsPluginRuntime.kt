@@ -207,7 +207,8 @@ class QuickJsPluginRuntime(
                         val raw = engine.invokeMethod(
                             pluginId,
                             "getRecommendSheetsByTag",
-                            arrayOf(tag, page)
+                            arrayOf(tag, page),
+                            timeoutMs = PLAYLIST_CALL_TIMEOUT_MS
                         )
                         val items = normalizePlaylistResult(
                             pluginResultItems(raw, "data", "list", "items"),
@@ -223,7 +224,12 @@ class QuickJsPluginRuntime(
                 }
             }
             if (engine.hasExport(pluginId, "getTopLists")) {
-                val raw = engine.invokeMethod(pluginId, "getTopLists", emptyArray())
+                val raw = engine.invokeMethod(
+                    pluginId,
+                    "getTopLists",
+                    emptyArray(),
+                    timeoutMs = PLAYLIST_CALL_TIMEOUT_MS
+                )
                 val items = normalizeTopListResult(raw, pluginId)
                 return PlaylistOutcome(items, isEnd = true)
             }
@@ -239,12 +245,15 @@ class QuickJsPluginRuntime(
             val isTopList = onlineSheet.pluginPayload.toMap()["hostCapability"] == "top-list"
             val method = if (isTopList) "getTopListDetail" else "getMusicSheetInfo"
             if (!engine.hasExport(pluginId, method)) return emptyList()
-            val args: Array<Any?> = if (isTopList) {
-                arrayOf(pluginInputFor(onlineSheet))
-            } else {
-                arrayOf(pluginInputFor(onlineSheet), page)
-            }
-            val raw = engine.invokeMethod(pluginId, method, args)
+            // 协议签名：getMusicSheetInfo(sheet, page) / getTopListDetail(topList, page)。
+            // 两个方法都必须传 page——部分脚本（酷我）对缺失 page 无兜底，会直接返回空。
+            val args: Array<Any?> = arrayOf(pluginInputFor(onlineSheet), page)
+            val raw = engine.invokeMethod(
+                pluginId,
+                method,
+                args,
+                timeoutMs = PLAYLIST_CALL_TIMEOUT_MS
+            )
             val musicList = pluginResultItems(raw, "musicList", "data", "list", "items")
             val normalized = normalizeSearchResult(musicList) { _, id ->
                 ProviderTrackKey(pluginId, id.toString())
@@ -257,7 +266,12 @@ class QuickJsPluginRuntime(
         override suspend fun topLists(): List<Any> {
             if (!supportsTopLists()) return emptyList()
             return normalizeTopListResult(
-                engine.invokeMethod(pluginId, "getTopLists", emptyArray()),
+                engine.invokeMethod(
+                    pluginId,
+                    "getTopLists",
+                    emptyArray(),
+                    timeoutMs = PLAYLIST_CALL_TIMEOUT_MS
+                ),
                 pluginId
             )
         }
@@ -268,7 +282,8 @@ class QuickJsPluginRuntime(
     }
 
     private companion object {
-        const val DEFAULT_CALL_TIMEOUT_MS = 10_000L
+        const val DEFAULT_CALL_TIMEOUT_MS = 30_000L
+        const val PLAYLIST_CALL_TIMEOUT_MS = 0L
         const val NETEASE_PLUGIN_ID = "linglan.wy"
         val REQUIRED_EXPORTS = listOf("search", "getMediaSource", "getLyric")
     }

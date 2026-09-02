@@ -27,6 +27,14 @@ class PluginSourceFilterTest {
     }
 
     @Test
+    fun stableIdCannotBypassDownloadUrlAllowlist() {
+        val items = listOf(
+            item("linglan.kw", "https://evil.example/kw.js", name = "酷我")
+        )
+        assertTrue(allowedManifestItems(items, DEFAULT_SOURCE_ALLOW_RULES).isEmpty())
+    }
+
+    @Test
     fun allowRuleMatchesHostPathAndType() {
         val rule = SourceAllowRule(hostPrefix = "provider.example", pathPrefix = "/kw", sourceType = "kw")
         assertTrue(rule.matches("https://provider.example/kw/script.js?token=secret"))

@@ -16,7 +16,9 @@ class PluginRegistry(
     private val verifier: ManifestSignatureVerifier,
     private val cache: PluginScriptCache,
     private val hostParams: Map<String, Any?> = emptyMap(),
-    private val requireSignedManifest: Boolean = true
+    private val requireSignedManifest: Boolean = true,
+    private val requireManifestSha256: Boolean = false,
+    private val installPolicy: (ManifestItem) -> Boolean = { true }
 ) {
     private val runtimes = mutableMapOf<String, PluginRuntime>()
 
@@ -50,6 +52,7 @@ class PluginRegistry(
 
     suspend fun install(item: ManifestItem): Result<MusicProvider> {
         if (isRevoked(item.status)) return Result.failure(IllegalStateException("插件已被撤销"))
+        if (!installPolicy(item)) return Result.failure(IllegalStateException("source url not allowed"))
         val bytes = try {
             downloader(item.url)
         } catch (e: CancellationException) {
@@ -61,17 +64,26 @@ class PluginRegistry(
         val script = String(bytes, Charsets.UTF_8)
 
         // 生产签名硬门槛（GC #10）：缺签名或签名无效 → 拒绝。
-        // 过渡模式（requireSignedManifest=false）：聆澜清单尚无签名（已探测确认），
-        // 降级为「HTTPS 来源 + 大小上限 + 可选 SHA-256」；联调提供签名后恢复门禁。
+        // 默认不依赖服务端提供 SHA-256；清单提供哈希时仍校验，显式开启后才拒绝缺失。
         val signature = item.signature
         if (requireSignedManifest) {
+            val expectedSha256 = item.sha256?.takeIf { it.isNotBlank() }
+                ?: return Result.failure(IllegalStateException("manifest missing sha256"))
             if (signature == null) return Result.failure(IllegalStateException("manifest missing signature"))
             val decision = verifier.verify(item, script, signature, item.signatureTimestamp ?: 0L)
             if (decision is VerifyDecision.Invalid) return Result.failure(IllegalStateException(decision.reason))
+            if (!ManifestSignatureVerifier.sha256Hex(script).equals(expectedSha256, ignoreCase = true)) {
+                return Result.failure(IllegalStateException("script hash mismatch"))
+            }
+        } else if (requireManifestSha256) {
+            val expectedSha256 = item.sha256?.takeIf { it.isNotBlank() }
+                ?: return Result.failure(IllegalStateException("manifest missing sha256"))
+            if (!ManifestSignatureVerifier.sha256Hex(script).equals(expectedSha256, ignoreCase = true)) {
+                return Result.failure(IllegalStateException("script hash mismatch"))
+            }
         } else {
-            // 仅当清单提供 sha256 时校验脚本摘要（防传输篡改）；缺失则退化为 HTTPS 信任
-            item.sha256?.let { expected ->
-                if (!ManifestSignatureVerifier.sha256Hex(script).equals(expected, ignoreCase = true)) {
+            item.sha256?.takeIf { it.isNotBlank() }?.let { expectedSha256 ->
+                if (!ManifestSignatureVerifier.sha256Hex(script).equals(expectedSha256, ignoreCase = true)) {
                     return Result.failure(IllegalStateException("script hash mismatch"))
                 }
             }

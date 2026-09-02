@@ -50,6 +50,8 @@ internal fun onlinePlaylistUiId(pluginId: String, remoteId: String): Long =
 data class DiscoverUiState(
     val recommendedPlaylists: List<RecommendedPlaylistUi> = emptyList(),
     val recommendedSongs: List<OnlineTrack> = emptyList(),
+    val topLists: List<RecommendedPlaylistUi> = emptyList(),
+    val recentTracks: List<OnlineTrack> = emptyList(),
     val recommendationSourceLabel: String? = null,
     val recommendationError: String? = null,
     val songRecommendationError: String? = null,
@@ -117,6 +119,8 @@ class MainViewModel : ViewModel() {
     private val _playlistState = MutableStateFlow(PlaylistDetailUiState())
     val playlistState: StateFlow<PlaylistDetailUiState> = _playlistState
     private var durationEnrichmentJob: Job? = null
+    private var onlinePlaylistDetailJob: Job? = null
+    private var playlistDetailRequest = 0L
 
     private val _artistDetailState = MutableStateFlow(ArtistDetailUiState())
     val artistDetailState: StateFlow<ArtistDetailUiState> = _artistDetailState
@@ -175,22 +179,24 @@ class MainViewModel : ViewModel() {
         viewModelScope.launch {
             _discoverState.value = current.copy(isLoading = true, error = null)
             val provider = sourceId?.let { NeteaseApp.instance.pluginRuntime.providerFor(it) }
-            val recommendationResult = when {
-                sourceId == null -> Result.success(emptyList())
-                provider == null -> Result.failure(IllegalStateException("在线来源正在恢复，请稍后重试"))
-                !provider.supportsRecommendedSheets() ->
-                    Result.failure(IllegalStateException("当前音源暂不提供推荐歌单"))
-                else -> try {
-                    Result.success(
-                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                            provider.recommendedSheets(page = 1).items
+            val recommendationResult = try {
+                Result.success(
+                    kotlinx.coroutines.withContext<List<OnlinePlaylist>>(
+                        kotlinx.coroutines.Dispatchers.IO
+                    ) {
+                        when {
+                            sourceId == null -> emptyList()
+                            provider == null -> throw IllegalStateException("在线来源正在恢复，请稍后重试")
+                            !provider.supportsRecommendedSheets() ->
+                                throw IllegalStateException("当前音源暂不提供推荐歌单")
+                            else -> provider.recommendedSheets(page = 1).items
                         }
-                    )
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Result.failure(e)
-                }
+                    }
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(e)
             }
 
             val onlinePlaylists = recommendationResult.getOrDefault(emptyList())
@@ -201,10 +207,13 @@ class MainViewModel : ViewModel() {
                     recommendationResult.exceptionOrNull()
                         ?: IllegalStateException("当前音源暂时没有可用推荐")
                 )
-                !provider.supportsMusicSheet() ->
-                    Result.failure(IllegalStateException("当前音源暂不提供推荐歌曲"))
                 else -> try {
-                    val tracks = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val tracks = kotlinx.coroutines.withContext<List<OnlineTrack>>(
+                        kotlinx.coroutines.Dispatchers.IO
+                    ) {
+                        if (!provider.supportsMusicSheet()) {
+                            throw IllegalStateException("当前音源暂不提供推荐歌曲")
+                        }
                         var selected = emptyList<OnlineTrack>()
                         for (playlist in onlinePlaylists.take(4)) {
                             val candidate = runCatching {
@@ -228,7 +237,7 @@ class MainViewModel : ViewModel() {
                     Result.failure(e)
                 }
             }
-            onlinePlaylistByUiId.clear()
+onlinePlaylistByUiId.clear()
             val recommended = onlinePlaylists.map { playlist ->
                 val uiId = onlinePlaylistUiId(playlist.pluginId, playlist.remoteId)
                 onlinePlaylistByUiId[uiId] = playlist
@@ -240,9 +249,53 @@ class MainViewModel : ViewModel() {
                     creator = playlist.creator
                 )
             }
+
+            val topListResult = try {
+                Result.success(
+                    kotlinx.coroutines.withContext<List<Any>>(
+                        kotlinx.coroutines.Dispatchers.IO
+                    ) {
+                        when {
+                            sourceId == null -> emptyList()
+                            provider == null -> throw IllegalStateException("在线来源正在恢复，请稍后重试")
+                            !provider.supportsTopLists() -> emptyList()
+                            else -> provider.topLists()
+                        }
+                    }
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+            val topLists = topListResult.getOrDefault(emptyList())
+                .mapNotNull { it as? OnlinePlaylist }
+                .map { playlist ->
+                    val uiId = onlinePlaylistUiId(playlist.pluginId, playlist.remoteId)
+                    onlinePlaylistByUiId[uiId] = playlist
+                    RecommendedPlaylistUi(
+                        id = uiId,
+                        title = playlist.title,
+                        artworkUrl = playlist.artworkUrl,
+                        playCount = playlist.playCount,
+                        creator = playlist.creator
+                    )
+                }
+
+            val recentTracks = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching { onlinePlaybackHistoryStore.load() }
+                    .getOrDefault(emptyList())
+                    .take(RECENT_TRACKS_LIMIT)
+            }
+
+            // 每周推荐为幂等 single-flight；无数据/失败时首页卡片自动隐藏。
+            loadWeeklyRecommendation()
+
             _discoverState.value = DiscoverUiState(
                 recommendedPlaylists = recommended,
                 recommendedSongs = songRecommendationResult.getOrDefault(emptyList()),
+                topLists = topLists,
+                recentTracks = recentTracks,
                 recommendationSourceLabel = sourceId?.let(::sourceLabel),
                 recommendationError = when {
                     sourceId == null -> "连接在线音源后显示推荐歌单"
@@ -273,6 +326,8 @@ class MainViewModel : ViewModel() {
     // ---- 歌单详情（每周推荐；在线歌单在插件能力接入前不可用）----
 
     fun loadPlaylistDetail(id: Long, force: Boolean = false) {
+        playlistDetailRequest++
+        onlinePlaylistDetailJob?.cancel()
         durationEnrichmentJob?.cancel()
         userPlaylistStore.content(id)?.let { content ->
             _playlistState.value = PlaylistDetailUiState(
@@ -346,6 +401,19 @@ class MainViewModel : ViewModel() {
         )
     }
 
+    fun clearPlaylistDetail() {
+        playlistDetailRequest++
+        onlinePlaylistDetailJob?.cancel()
+        onlinePlaylistDetailJob = null
+        durationEnrichmentJob?.cancel()
+        durationEnrichmentJob = null
+        val current = _playlistState.value
+        if (current.isLoading) {
+            playlistCache.remove(current.loadedPlaylistId)
+        }
+        _playlistState.value = PlaylistDetailUiState()
+    }
+
     private fun loadOnlinePlaylistDetail(id: Long, playlist: OnlinePlaylist, force: Boolean) {
         if (!force) {
             playlistCache[id]?.takeIf { it.isFullyLoaded }?.let {
@@ -366,24 +434,28 @@ class MainViewModel : ViewModel() {
             isLoading = true,
             loadedPlaylistId = id
         )
-        viewModelScope.launch {
+        val requestId = ++playlistDetailRequest
+        onlinePlaylistDetailJob?.cancel()
+        val job = viewModelScope.launch {
             val provider = NeteaseApp.instance.pluginRuntime.providerFor(playlist.pluginId)
             val result = try {
-                when {
-                    provider == null -> Result.failure(IllegalStateException("在线来源未加载，请返回后重试"))
-                    !provider.supportsMusicSheet() -> Result.failure(IllegalStateException("当前音源暂不支持歌单详情"))
-                    else -> Result.success(
-                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                            provider.musicSheetInfo(playlist, page = 1)
-                        }
-                    )
+                kotlinx.coroutines.withContext<Result<List<OnlineTrack>>>(
+                    kotlinx.coroutines.Dispatchers.IO
+                ) {
+                    when {
+                        provider == null -> Result.failure(IllegalStateException("在线来源未加载，请返回后重试"))
+                        !provider.supportsMusicSheet() -> Result.failure(IllegalStateException("当前音源暂不支持歌单详情"))
+                        else -> Result.success(provider.musicSheetInfo(playlist, page = 1))
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Result.failure(e)
             }
-            if (_playlistState.value.loadedPlaylistId != id) return@launch
+            if (_playlistState.value.loadedPlaylistId != id || requestId != playlistDetailRequest) {
+                return@launch
+            }
             val tracks = result.getOrDefault(emptyList())
             val finalState = PlaylistDetailUiState(
                 playlist = initialMeta.copy(trackCount = tracks.size),
@@ -398,6 +470,7 @@ class MainViewModel : ViewModel() {
             _playlistState.value = finalState
             enrichPlaylistDurations(id, tracks)
         }
+        onlinePlaylistDetailJob = job
     }
 
     private fun enrichPlaylistDurations(id: Long, tracks: List<OnlineTrack>) {
@@ -796,7 +869,7 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    private fun orderedFavoriteCover(
+private fun orderedFavoriteCover(
         songs: List<Song>,
         tracks: List<OnlineTrack>,
         order: List<String>
@@ -806,5 +879,9 @@ class MainViewModel : ViewModel() {
             FavoriteOrderStore.onlineKey(it.key) to (it.artworkUrl ?: it.album?.artworkUrl)
         }
         return order.firstNotNullOfOrNull { key -> localCovers[key] ?: onlineCovers[key] }
+    }
+
+    private companion object {
+        const val RECENT_TRACKS_LIMIT = 10
     }
 }

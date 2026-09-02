@@ -241,7 +241,12 @@ class QuickJsRuntime(
         helper.call(name) as? Boolean ?: false
     }
 
-    fun invokeMethod(pluginId: String, name: String, args: Array<Any?>): Any? = submit {
+    fun invokeMethod(
+        pluginId: String,
+        name: String,
+        args: Array<Any?>,
+        timeoutMs: Long = callTimeoutMs
+    ): Any? = submit(timeoutMs) {
         val plugin = loaded[pluginId]
             ?: throw PluginException("PLUGIN_NOT_LOADED", "插件未装载", retryable = false)
         val fn = plugin.exports.getJSFunctionProperty(name)
@@ -270,13 +275,17 @@ class QuickJsRuntime(
 
     // ---------- 内部 ----------
 
-    private fun <T> submit(task: () -> T): T {
+    private fun <T> submit(timeoutMs: Long = callTimeoutMs, task: () -> T): T {
         if (worker.isShutdown) {
             throw PluginException("RUNTIME_DESTROYED", "插件运行时已销毁", retryable = false)
         }
         val future = worker.submit(Callable { task() })
         return try {
-            future.get(callTimeoutMs, TimeUnit.MILLISECONDS)
+            if (timeoutMs <= 0L) {
+                future.get()
+            } else {
+                future.get(timeoutMs, TimeUnit.MILLISECONDS)
+            }
         } catch (e: TimeoutException) {
             future.cancel(true)
             throw PluginException("TIMEOUT", "插件调用超时", retryable = true)
@@ -508,11 +517,11 @@ class QuickJsRuntime(
     }
 
     private companion object {
-        const val DEFAULT_CALL_TIMEOUT_MS = 10_000L
+        const val DEFAULT_CALL_TIMEOUT_MS = 30_000L
         const val DEFAULT_MAX_MEMORY_MB = 64
         const val BYTES_PER_MIB = 1024 * 1024
         const val MAX_JS_DEPTH = 8
-        const val PROMISE_POLL_ITERATIONS = 200
+        const val PROMISE_POLL_ITERATIONS = 2_000
 
         /** 宿主注入的 JS 前置：module/exports/require + 兼容模块 + 受控宿主对象。 */
         const val PREAMBLE = """

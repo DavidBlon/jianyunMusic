@@ -52,7 +52,6 @@ class MusicSourceKeyValidator {
         val url = runCatching {
             validationEndpoint.newBuilder()
                 .addQueryParameter("checkUpdate", CLIENT_CHECK_ID)
-                .addQueryParameter("key", key)
                 .build()
         }.getOrNull() ?: run {
             return MusicSourceKeyValidationResult.Unavailable("音源服务地址不可用")
@@ -61,6 +60,7 @@ class MusicSourceKeyValidator {
             .url(url)
             .header("Content-Type", "application/json")
             .header("User-Agent", "JianYunMusic/${BuildConfig.VERSION_NAME}")
+            .header("X-API-Key", key)
             .get()
             .build()
 

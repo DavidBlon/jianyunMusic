@@ -22,14 +22,16 @@ data class ManifestItem(
     val signatureTimestamp: Long? = null
 )
 
-/** 在线来源清单客户端。带密钥的请求地址只存在于内存中，不写入日志或偏好。 */
+/** 在线来源清单客户端。密钥由调用方通过请求头传递，不进入 URL 查询参数。 */
 class LinglanManifestClient(
-    private val http: suspend (String) -> String,
+    private val http: suspend (url: String, secret: String) -> String,
     private val endpointTemplate: String = DEFAULT_ENDPOINT_TEMPLATE
 ) {
     suspend fun fetch(secret: String): List<ManifestItem> = try {
-        val url = requestUrl(secret)
-        val root = JsonParser.parseString(withContext(Dispatchers.IO) { http(url) }).asJsonObject
+        val url = requestUrl()
+        val root = JsonParser.parseString(
+            withContext(Dispatchers.IO) { http(url, secret) }
+        ).asJsonObject
         val plugins = root.getAsJsonArray("plugins") ?: return emptyList()
         plugins.mapNotNull { element ->
             val item = element.asJsonObject
@@ -60,16 +62,13 @@ class LinglanManifestClient(
         emptyList()
     }
 
-    internal fun requestUrl(secret: String): String {
+    internal fun requestUrl(): String {
         val endpoint = endpointTemplate.toHttpUrlOrNull()
             ?: throw IllegalArgumentException("\u5728\u7ebf\u6765\u6e90\u5730\u5740\u65e0\u6548")
-        return endpoint.newBuilder()
-            .setQueryParameter("key", secret)
-            .build()
-            .toString()
+        return endpoint.toString()
     }
 
     companion object {
-        const val DEFAULT_ENDPOINT_TEMPLATE = "https://source.shiqianjiang.cn/api/script/mf.json?key="
+        const val DEFAULT_ENDPOINT_TEMPLATE = "https://source.shiqianjiang.cn/api/script/mf.json"
     }
 }

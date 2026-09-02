@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#0c121b" />
+  <meta name="description" content="简云音乐网页版" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://songsearch.kugou.com https://search.kuwo.cn https://c.y.qq.com; connect-src https:; img-src 'self' data: https:; media-src https: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" />
+  <title>简云音乐</title>
+  <link rel="icon" href="./assets/app-icon.png" />
+  <link rel="stylesheet" href="./styles.css?v=18" />
+</head>
+<body>
+  <div id="app" class="app-shell" aria-live="polite"></div>
+  <audio id="audio" preload="metadata"></audio>
+  <div id="toast" class="toast" role="status"></div>
+  <script defer src="./app.js?v=18"></script>
+</body>
+</html>

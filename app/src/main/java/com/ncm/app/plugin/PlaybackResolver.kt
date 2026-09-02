@@ -99,18 +99,40 @@ class PlaybackResolver(
         provider: MusicProvider,
         track: OnlineTrack,
         quality: String?
-    ): Result<ResolvedMedia> = try {
-        val media = provider.resolveMedia(track, quality)
-        // 播放地址有时效性：过期即失败，不缓存/不落库（GC #11）
-        if (media.expiresAtEpochMs != null && now() > media.expiresAtEpochMs) {
-            Result.failure(IllegalStateException("播放地址已过期"))
-        } else {
-            validateMedia(media)
+    ): Result<ResolvedMedia> {
+        // 音质降级链（参照 MusicFree qualityOrder）：所选音质失败时依次尝试更低音质，
+        // 避免单曲在服务端没有该音质权限/资源时整首不可播。
+        val qualities = qualityFallbackOrder(quality)
+        var lastFailure: Throwable? = null
+        for (candidate in qualities) {
+            val attempt = try {
+                val media = provider.resolveMedia(track, candidate)
+                if (media.expiresAtEpochMs != null && now() > media.expiresAtEpochMs) {
+                    Result.failure(IllegalStateException("播放地址已过期"))
+                } else {
+                    validateMedia(media)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+            attempt.getOrNull()?.let { return Result.success(it) }
+            lastFailure = attempt.exceptionOrNull()
         }
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        Result.failure(e)
+        return Result.failure(
+            lastFailure ?: IllegalStateException("当前音源无法解析播放地址")
+        )
+    }
+
+    /** 从所选音质向下降级，直到最低可用档；未知标签保持原值并兜底最低档。 */
+    private fun qualityFallbackOrder(quality: String?): List<String?> = when (quality) {
+        "hires" -> listOf("hires", "flac", "320k", "128k")
+        "flac24bit" -> listOf("flac24bit", "flac", "320k", "128k")
+        "flac" -> listOf("flac", "320k", "128k")
+        "320k" -> listOf("320k", "128k")
+        "standard", "high", "128k" -> listOf(quality, "128k").distinct()
+        else -> listOf(quality, "128k").distinct()
     }
 
     private fun validateMedia(media: ResolvedMedia): Result<ResolvedMedia> {
