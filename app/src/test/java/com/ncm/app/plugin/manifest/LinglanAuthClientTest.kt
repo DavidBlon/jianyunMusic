@@ -50,7 +50,18 @@ class LinglanAuthClientTest {
     @Test
     fun missingSongParametersAfterAuthenticationMapsToActive() = runTest {
         val client = LinglanAuthClient(
-            http = { _, _ -> """{"code":400,"message":"缺少歌曲参数"}""" }
+            http = { _, _ -> """{"code":400,"message":"缺少必要参数: source, songId, quality"}""" }
+        )
+
+        assertEquals(LinglanAuthState.ACTIVE, client.validate("valid-key-123").state)
+    }
+
+    @Test
+    fun platformScopeErrorOnProbeStillMeansKeyIsValid() = runTest {
+        // 服务端先校验卡密、再校验平台/音质权限；探测未带歌曲时可能返回范围 403。
+        // 不存在的卡密返回 401，因此该 403 说明卡密本身有效。
+        val client = LinglanAuthClient(
+            http = { _, _ -> """{"code":403,"message":"当前卡密不支持该平台或音质"}""" }
         )
 
         assertEquals(LinglanAuthState.ACTIVE, client.validate("valid-key-123").state)
@@ -63,7 +74,7 @@ class LinglanAuthClientTest {
             http = { _, _ -> "{\"code\":200}" }
         )
         assertEquals(
-            "https://example.test/music/url",
+            "https://example.test/music/url?source=kg&quality=128k",
             client.requestUrl()
         )
     }

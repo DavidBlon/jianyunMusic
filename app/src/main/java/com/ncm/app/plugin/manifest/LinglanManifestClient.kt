@@ -22,13 +22,16 @@ data class ManifestItem(
     val signatureTimestamp: Long? = null
 )
 
-/** 在线来源清单客户端。密钥由调用方通过请求头传递，不进入 URL 查询参数。 */
+/**
+ * 在线来源清单客户端。聆澜 mf.json 现在只接受 key 查询参数（请求头鉴权返回 401），
+ * 因此密钥会随请求 URL 传递；返回的脚本 URL 同样由服务端附带 key（服务端设计如此）。
+ */
 class LinglanManifestClient(
     private val http: suspend (url: String, secret: String) -> String,
     private val endpointTemplate: String = DEFAULT_ENDPOINT_TEMPLATE
 ) {
     suspend fun fetch(secret: String): List<ManifestItem> = try {
-        val url = requestUrl()
+        val url = requestUrl(secret)
         val root = JsonParser.parseString(
             withContext(Dispatchers.IO) { http(url, secret) }
         ).asJsonObject
@@ -62,10 +65,13 @@ class LinglanManifestClient(
         emptyList()
     }
 
-    internal fun requestUrl(): String {
+    internal fun requestUrl(secret: String): String {
         val endpoint = endpointTemplate.toHttpUrlOrNull()
             ?: throw IllegalArgumentException("\u5728\u7ebf\u6765\u6e90\u5730\u5740\u65e0\u6548")
-        return endpoint.toString()
+        return endpoint.newBuilder()
+            .setQueryParameter("key", secret)
+            .build()
+            .toString()
     }
 
     companion object {

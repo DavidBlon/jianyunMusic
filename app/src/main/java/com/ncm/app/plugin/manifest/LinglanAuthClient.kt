@@ -40,9 +40,14 @@ class LinglanAuthClient(
                     val message = root.get("message")?.asString?.trim().orEmpty()
                     val state = when {
                         code == 200 -> LinglanAuthState.ACTIVE
-                        // The probe deliberately omits song parameters. A non-auth 400 means
+                        // The probe deliberately omits the song id. A non-auth 400 means
                         // the credential passed the key middleware and reached the music API.
                         code == 400 && !message.contains("密钥") -> LinglanAuthState.ACTIVE
+                        // The server checks key validity before platform/quality scope. A scope
+                        // error on the probe only means the requested platform/quality is not
+                        // permitted for the card, not that the credential is invalid
+                        // (unknown/disabled keys return 401).
+                        code == 403 && message.contains("不支持该平台") -> LinglanAuthState.ACTIVE
                         code == 401 -> LinglanAuthState.EXPIRED
                         code == 403 -> LinglanAuthState.REVOKED
                         else -> LinglanAuthState.ERROR
@@ -71,10 +76,19 @@ class LinglanAuthClient(
     internal fun requestUrl(): String {
         val parsed = endpoint.toHttpUrlOrNull()
             ?: throw IllegalArgumentException("\u6388\u6743\u670d\u52a1\u5730\u5740\u65e0\u6548")
-        return parsed.toString()
+        // The server evaluates card permissions before required parameters, so a probe
+        // without platform/quality is rejected with 403 even for valid cards. Send a
+        // widely supported platform/quality and omit only the song id.
+        return parsed.newBuilder()
+            .setQueryParameter("source", PROBE_SOURCE)
+            .setQueryParameter("quality", PROBE_QUALITY)
+            .build()
+            .toString()
     }
 
     companion object {
         const val DEFAULT_ENDPOINT = "https://linglan.invalid/api/auth/validate"
+        internal const val PROBE_SOURCE = "kg"
+        internal const val PROBE_QUALITY = "128k"
     }
 }

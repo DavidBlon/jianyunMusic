@@ -23,9 +23,14 @@ val ALLOWED_SOURCE_TYPES: Set<String> = setOf("kw", "kugou", "kg", "tx", "qq", "
 
 /**
  * 临时允许列表：预置主机 + 路径 + 精确来源类型；不含 Bilibili/GitCode（GC #9）。
- * 聆澜真实清单路径为 /api/script/mf/{kg,kw,tx,wy}.js（已探测确认）。
+ * 聆澜真实清单路径为 /api/script/mf/{kg,kw,tx,wy}.js（已探测确认）；保留无 /api
+ * 前缀的旧路径以兼容服务端回退。
  */
 val DEFAULT_SOURCE_ALLOW_RULES: List<SourceAllowRule> = listOf(
+    SourceAllowRule("source.shiqianjiang.cn", "/api/script/mf/kg.js", "kg"),
+    SourceAllowRule("source.shiqianjiang.cn", "/api/script/mf/kw.js", "kw"),
+    SourceAllowRule("source.shiqianjiang.cn", "/api/script/mf/tx.js", "tx"),
+    SourceAllowRule("source.shiqianjiang.cn", "/api/script/mf/wy.js", "wy"),
     SourceAllowRule("source.shiqianjiang.cn", "/script/mf/kg.js", "kg"),
     SourceAllowRule("source.shiqianjiang.cn", "/script/mf/kw.js", "kw"),
     SourceAllowRule("source.shiqianjiang.cn", "/script/mf/tx.js", "tx"),

@@ -68,7 +68,7 @@ class LinglanManifestClientTest {
     }
 
     @Test
-    fun endpointTemplateNeverContainsSecretInUrl() = runTest {
+    fun manifestRequestCarriesKeyQueryParameterBecauseServerRequiresIt() = runTest {
         var requestedUrl: String? = null
         var requestedSecret: String? = null
         val client = LinglanManifestClient(
@@ -76,19 +76,19 @@ class LinglanManifestClientTest {
             http = { url, secret -> requestedUrl = url; requestedSecret = secret; "{\"plugins\":[]}" }
         )
         client.fetch("CERU_KEY-abc")
-        assertEquals("https://example.test/mf.json", requestedUrl)
+        assertEquals("https://example.test/mf.json?key=CERU_KEY-abc", requestedUrl)
         assertEquals("CERU_KEY-abc", requestedSecret)
     }
 
     @Test
-    fun requestUrlHasNoCredentialQueryParameter() {
+    fun requestUrlCarriesKeyForServerAuth() {
         val client = LinglanManifestClient(
             endpointTemplate = "https://example.test/mf.json",
             http = { _, _ -> "{\"plugins\":[]}" }
         )
         assertEquals(
-            "https://example.test/mf.json",
-            client.requestUrl()
+            "https://example.test/mf.json?key=secret-key",
+            client.requestUrl("secret-key")
         )
     }
 }
