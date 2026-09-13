@@ -22,7 +22,7 @@ local.properties
 D:SoftWarecursor
 D*SoftWarecursor
 
-# Keystore (签名文件，切勿提交)
+# Keystore (签名文件，切勿提�?
 *.jks
 *.keystore
 keystore.properties
@@ -49,4 +49,4 @@ ui-*.xml
 memu-*.png
 release/*.apk
 release/update-*.json
-webapp/tests/.chrome-settings-jump/
+webapp/
