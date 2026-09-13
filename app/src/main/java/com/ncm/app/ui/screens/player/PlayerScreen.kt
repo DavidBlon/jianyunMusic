@@ -157,7 +157,7 @@ fun PlayerScreen(
                 if (useGlobalCustomBackground) {
                     Modifier
                 } else {
-                    Modifier.background(Brush.verticalGradient(listOf(Color(0xFF111821), DarkBg)))
+                    Modifier.background(Brush.verticalGradient(listOf(DarkBg2, DarkBg)))
                 }
             )
     ) {
@@ -1055,21 +1055,21 @@ private fun LyricsPanel(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(top = with(LocalDensity.current) { (viewportHeight * 0.38f).toDp() })
-                    .background(Color(0x1AFFFFFF), RoundedCornerShape(14.dp))
+                    .background(DarkSurface2.copy(alpha = 0.55f), RoundedCornerShape(14.dp))
                     .padding(horizontal = 14.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = formatTime(line.timeMs.coerceIn(0L, duration)),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = Color(0xFFDDDDDD)
+                    color = TextPrimary
                 )
                 Spacer(Modifier.width(10.dp))
                 Box(
                     modifier = Modifier
                         .width(1.dp)
                         .height(18.dp)
-                        .background(Color(0x66FFFFFF))
+                        .background(TextTertiary.copy(alpha = 0.5f))
                 )
                 Spacer(Modifier.width(4.dp))
                 IconButton(
@@ -1083,7 +1083,7 @@ private fun LyricsPanel(
                     Icon(
                         imageVector = Icons.Default.PlayArrow,
                         contentDescription = "定位到该句",
-                        tint = Color.White
+                        tint = TextPrimary
                     )
                 }
             }
@@ -1105,7 +1105,7 @@ private fun LyricRow(
     val mainColor by animateColorAsState(
         targetValue = when {
             active -> TextPrimary
-            isDragging -> Color.White
+            isDragging -> TextPrimary
             else -> TextSecondary
         },
         animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
@@ -1261,7 +1261,7 @@ private fun PlayerControls(
                     Icon(
                         imageVector = if (isPlaying) androidx.compose.material.icons.Icons.Filled.Pause else androidx.compose.material.icons.Icons.Filled.PlayArrow,
                         contentDescription = if (isPlaying) "暂停" else "播放",
-                        tint = Color.White,
+                        tint = TextPrimary,
                         modifier = Modifier.size(32.dp)
                     )
                 }
@@ -1574,7 +1574,7 @@ private fun ProgressBar(
     }
     var trackWidthPx by remember { mutableFloatStateOf(1f) }
     val enabled = duration > 0
-    val activeColor = if (enabled) Color.White else TextTertiary
+    val activeColor = if (enabled) TextPrimary else TextTertiary
 
     fun progressFromX(x: Float): Float {
         return (x / trackWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)

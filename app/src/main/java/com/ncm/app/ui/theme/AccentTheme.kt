@@ -5,22 +5,74 @@ import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
+enum class AppThemeMode(val label: String) {
+    SYSTEM("跟随系统"),
+    LIGHT("浅色"),
+    DARK("深色")
+}
+
 enum class AccentTheme(
     val label: String,
     val color: Color,
     val secondary: Color,
-    val highlight: Color
+    val highlight: Color,
+    val lightColor: Color,
+    val lightSecondary: Color,
+    val lightHighlight: Color
 ) {
-    GREEN("翡翠青", Color(0xFF72D69B), Color(0xFF4DB8A5), Color(0xFFD6B86B)),
-    BLUE("深海蓝", Color(0xFF78A9F8), Color(0xFF667FE5), Color(0xFF63CDDA)),
-    PURPLE("暮光紫", Color(0xFFB29AEF), Color(0xFF7E8CE8), Color(0xFFD994C4)),
-    ORANGE("琥珀橙", Color(0xFFE7A566), Color(0xFFD4765C), Color(0xFFE3C474)),
-    RED("酒红玫瑰", Color(0xFFE27B8B), Color(0xFFB65E7B), Color(0xFFE39B70))
+    BLUE(
+        "蓝色",
+        Color(0xFF0A84FF), Color(0xFF0A84FF), Color(0xFF5AC8FA),
+        Color(0xFF007AFF), Color(0xFF007AFF), Color(0xFF5AC8FA)
+    ),
+    TEAL(
+        "青绿色",
+        Color(0xFF64D2FF), Color(0xFF64D2FF), Color(0xFF00C7BE),
+        Color(0xFF32ADE6), Color(0xFF32ADE6), Color(0xFF00C7BE)
+    ),
+    PURPLE(
+        "紫色",
+        Color(0xFFBF5AF2), Color(0xFFDA62FF), Color(0xFFC99CFF),
+        Color(0xFFAF52DE), Color(0xFFA94FE0), Color(0xFFBF5AF2)
+    ),
+    ORANGE(
+        "橙色",
+        Color(0xFFFF9F0A), Color(0xFFBF8430), Color(0xFFFFD60A),
+        Color(0xFFFF9500), Color(0xFFF08700), Color(0xFFFFCC00)
+    ),
+    RED(
+        "红色",
+        Color(0xFFFF453A), Color(0xFFFF6961), Color(0xFFFF8A80),
+        Color(0xFFFF3B30), Color(0xFFFF6259), Color(0xFFFF8A80)
+    ),
+    GREEN(
+        "绿色",
+        Color(0xFF32D74B), Color(0xFF30D158), Color(0xFF87E8A0),
+        Color(0xFF34C759), Color(0xFF28B24C), Color(0xFF30D158)
+    )
 }
 
 class AccentThemeSettings(context: Context) {
     private val prefs = context.getSharedPreferences("ncm_theme", Context.MODE_PRIVATE)
-    private val _theme = MutableStateFlow(AccentTheme.entries.firstOrNull { it.name == prefs.getString("accent", AccentTheme.GREEN.name) } ?: AccentTheme.GREEN)
+    private val _theme = MutableStateFlow(
+        AccentTheme.entries.firstOrNull { it.name == prefs.getString("accent", AccentTheme.BLUE.name) }
+            ?: AccentTheme.BLUE
+    )
     val theme: StateFlow<AccentTheme> = _theme
-    fun setTheme(theme: AccentTheme) { prefs.edit().putString("accent", theme.name).apply(); _theme.value = theme }
+
+    private val _mode = MutableStateFlow(
+        AppThemeMode.entries.firstOrNull { it.name == prefs.getString("mode", AppThemeMode.SYSTEM.name) }
+            ?: AppThemeMode.SYSTEM
+    )
+    val mode: StateFlow<AppThemeMode> = _mode
+
+    fun setTheme(theme: AccentTheme) {
+        prefs.edit().putString("accent", theme.name).apply()
+        _theme.value = theme
+    }
+
+    fun setMode(mode: AppThemeMode) {
+        prefs.edit().putString("mode", mode.name).apply()
+        _mode.value = mode
+    }
 }

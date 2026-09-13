@@ -19,9 +19,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -136,10 +138,10 @@ class MainActivity : ComponentActivity() {
         requestNotificationPermissionIfNeeded()
         setContent {
             val accentTheme by NeteaseApp.instance.accentThemeSettings.theme.collectAsState()
+            val themeMode by NeteaseApp.instance.accentThemeSettings.mode.collectAsState()
             NeteaseMusicTheme(
-                accent = accentTheme.color,
-                secondaryAccent = accentTheme.secondary,
-                highlightAccent = accentTheme.highlight
+                accentTheme = accentTheme,
+                mode = themeMode
             ) {
                 MainApp()
             }
@@ -325,7 +327,11 @@ fun MainApp() {
 
                     AnimatedVisibility(
                         visible = showMiniPlayer,
-                        enter = fadeIn(animationSpec = tween(MINI_PLAYER_FADE_MILLIS)),
+                        enter = fadeIn(animationSpec = tween(MINI_PLAYER_FADE_MILLIS)) +
+                            slideInVertically(
+                                animationSpec = spring(dampingRatio = 1f, stiffness = 500f),
+                                initialOffsetY = { it / 3 }
+                            ),
                         exit = fadeOut(animationSpec = tween(MINI_PLAYER_FADE_MILLIS)),
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
@@ -553,11 +559,11 @@ private fun OpeningSplash() {
                         .size(112.dp)
                         .shadow(
                             elevation = 24.dp,
-                            shape = RoundedCornerShape(30.dp),
-                            ambientColor = Green500.copy(alpha = 0.22f),
-                            spotColor = Green500.copy(alpha = 0.18f)
+                            shape = RoundedCornerShape(26.dp),
+                            ambientColor = Color.Black.copy(alpha = 0.5f),
+                            spotColor = Color.Black
                         )
-                        .clip(RoundedCornerShape(30.dp))
+                        .clip(RoundedCornerShape(26.dp))
                         .background(DarkBg2),
                     contentAlignment = Alignment.Center
                 ) {
@@ -596,7 +602,7 @@ private fun OpeningSplash() {
                     modifier = Modifier
                         .width(76.dp)
                         .height(1.dp)
-                        .background(Color.White.copy(alpha = 0.18f))
+                        .background(TextTertiary.copy(alpha = 0.4f))
                 )
             }
         }
@@ -674,13 +680,11 @@ private fun BottomNavItem(
     val isPressed by interactionSource.collectIsPressedAsState()
     val iconScale by animateFloatAsState(
         targetValue = if (isPressed) 0.88f else 1f,
-        animationSpec = tween(durationMillis = 110),
+        animationSpec = spring(
+            dampingRatio = 1f,
+            stiffness = 1200f
+        ),
         label = "bottomTabIconScale"
-    )
-    val iconOffsetY by animateFloatAsState(
-        targetValue = if (isPressed) 2f else 0f,
-        animationSpec = tween(durationMillis = 110),
-        label = "bottomTabIconOffset"
     )
 
     Column(
@@ -693,42 +697,25 @@ private fun BottomNavItem(
                 indication = null,
                 onClick = onClick
             )
-            .padding(vertical = 4.dp)
     ) {
         Box(
             modifier = Modifier
-                .size(30.dp)
-                .then(
-                    if (isActive) {
-                        Modifier.background(
-                            Brush.radialGradient(
-                                listOf(
-                                    Green500.copy(alpha = 0.24f),
-                                    AccentSecondary.copy(alpha = 0.08f),
-                                    Color.Transparent
-                                )
-                            ),
-                            CircleShape
-                        )
-                    } else {
-                        Modifier
-                    }
-                )
+                .size(26.dp)
                 .graphicsLayer {
                     scaleX = iconScale
                     scaleY = iconScale
-                    translationY = iconOffsetY
                 },
             contentAlignment = Alignment.Center
         ) {
             icon()
         }
-        Spacer(modifier = Modifier.height(1.dp))
+        Spacer(modifier = Modifier.height(2.dp))
         Text(
             label,
             style = MaterialTheme.typography.labelSmall,
             color = if (isActive) TextPrimary else TextTertiary,
-            fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium
+            fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium,
+            maxLines = 1
         )
     }
 }
@@ -836,7 +823,7 @@ fun MiniPlayer(
                     Icon(
                         imageVector = if (isPlaying) androidx.compose.material.icons.Icons.Filled.Pause else androidx.compose.material.icons.Icons.Filled.PlayArrow,
                         contentDescription = null,
-                        tint = Color.White,
+                        tint = TextPrimary,
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -862,7 +849,7 @@ fun MiniPlayer(
                 .fillMaxWidth()
                 .height(2.dp)
                 .clip(CircleShape)
-                .background(Color.White.copy(alpha = 0.10f))
+                .background(TextTertiary.copy(alpha = 0.35f))
         ) {
             Box(
                 modifier = Modifier

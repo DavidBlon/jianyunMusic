@@ -57,6 +57,7 @@ fun MyScreen(
 ) {
     val state by viewModel.myState.collectAsState()
     val accentTheme by NeteaseApp.instance.accentThemeSettings.theme.collectAsState()
+    val themeMode by NeteaseApp.instance.accentThemeSettings.mode.collectAsState()
     val appearanceSettings = NeteaseApp.instance.playerAppearanceSettings
     val customBackground by appearanceSettings.customBackground.collectAsState()
     val applyCustomBackgroundGlobally by appearanceSettings.applyCustomBackgroundGlobally.collectAsState()
@@ -148,7 +149,7 @@ fun MyScreen(
 
     if (showAppearanceSettings) {
         SettingsSheet(
-            themeName = accentTheme.label,
+            themeName = "${accentTheme.label} · ${themeMode.label}",
             backgroundStatus = backgroundStatus,
             onBackgroundClick = {
                 showAppearanceSettings = false
@@ -173,12 +174,26 @@ fun MyScreen(
     if (showThemePicker) {
         ModalBottomSheet(onDismissRequest = { showThemePicker = false }, containerColor = GlassSurfaceStrong) {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
-                Text("主题设置", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+                Text("模式", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+                AppThemeMode.entries.forEach { modeOption ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            NeteaseApp.instance.accentThemeSettings.setMode(modeOption)
+                        }.padding(vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(modeOption.label, modifier = Modifier.weight(1f), color = TextPrimary)
+                        if (modeOption == themeMode) {
+                            Text("当前", color = Green500, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Text("主题色", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
                 AccentTheme.entries.forEach { theme ->
                     Row(
                         modifier = Modifier.fillMaxWidth().clickable {
                             NeteaseApp.instance.accentThemeSettings.setTheme(theme)
-                            showThemePicker = false
                         }.padding(vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -188,7 +203,11 @@ fun MyScreen(
                                 .clip(CircleShape)
                                 .background(
                                     Brush.linearGradient(
-                                        listOf(theme.highlight, theme.color, theme.secondary)
+                                        listOf(
+                                            if (themeMode == AppThemeMode.LIGHT) theme.lightHighlight else theme.highlight,
+                                            if (themeMode == AppThemeMode.LIGHT) theme.lightColor else theme.color,
+                                            if (themeMode == AppThemeMode.LIGHT) theme.lightSecondary else theme.secondary
+                                        )
                                     )
                                 )
                         )

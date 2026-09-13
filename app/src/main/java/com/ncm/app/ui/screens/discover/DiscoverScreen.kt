@@ -157,7 +157,7 @@ private fun WeeklyRecommendationCard(songCount: Int, cover: String?, onClick: ()
             .clip(RoundedCornerShape(14.dp))
             .background(
                 Brush.linearGradient(
-                    listOf(Color(0xFF1DB954), Color(0xFF0E6B3A))
+                    listOf(Color(0xFF0A84FF), Color(0xFF5E5CE6))
                 )
             )
             .clickable(onClick = onClick)

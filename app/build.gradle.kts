@@ -100,8 +100,8 @@ android {
         applicationId = "com.ncm.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 12
-        versionName = "2.4.2"
+        versionCode = 14
+        versionName = "2.4.4"
 
         buildConfigField("String", "API_BASE_URL", "\"https://music.163.com/\"")
         buildConfigField("String", "PAID_MUSIC_API_URL", buildConfigString(paidMusicApiUrl))

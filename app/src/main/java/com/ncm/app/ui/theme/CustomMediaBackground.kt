@@ -60,19 +60,12 @@ fun CustomBackgroundScrim(
     global: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    val stops = if (global) {
-        arrayOf(
-            0f to Color.Black.copy(alpha = 0.46f),
-            0.44f to Color.Black.copy(alpha = 0.30f),
-            1f to Color.Black.copy(alpha = 0.58f)
-        )
-    } else {
-        arrayOf(
-            0f to Color.Black.copy(alpha = 0.54f),
-            0.42f to Color.Black.copy(alpha = 0.18f),
-            1f to Color.Black.copy(alpha = 0.68f)
-        )
-    }
+    val baseAlpha = if (global) 0.28f else 0.22f
+    val stops = arrayOf(
+        0f to Color.Black.copy(alpha = baseAlpha + 0.16f),
+        0.16f to Color.Black.copy(alpha = baseAlpha),
+        1f to Color.Black.copy(alpha = baseAlpha)
+    )
     Box(
         modifier = modifier
             .fillMaxSize()
